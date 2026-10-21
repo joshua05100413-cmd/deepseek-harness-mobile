@@ -1,0 +1,8 @@
+{
+  "name": "dsh-phone-remote",
+  "version": "1.0.0",
+  "description": "DSHgo phone remote (PC side): phone traffic bridge + auto-login + tailscale publish, self-hosted inside dsh",
+  "type": "module",
+  "main": "lib/index.js",
+  "license": "MIT"
+}
