@@ -6,6 +6,7 @@
 
 - 作者：**Fa2517**（[bilibili](https://space.bilibili.com/330037645)）
 - 版本：v1.0 · 本项目完全开源
+- **有任何问题，欢迎在 B 站视频下方留言交流** → [@Fa2517](https://space.bilibili.com/330037645)；GitHub Issues 也行，但最好在 B 站知会一声
 
 ## 功能
 
@@ -75,3 +76,4 @@ build.bat
 ## License
 
 [MIT](LICENSE) · Made with ❤ by [Fa2517](https://space.bilibili.com/330037645)
+· **有问题视频下方聊，B 站见！**
