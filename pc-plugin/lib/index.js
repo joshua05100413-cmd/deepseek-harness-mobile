@@ -46,6 +46,11 @@ function logFile(file) {
 }
 
 export function apply(ctx, config = {}) {
+  // When spawned as the cookie-minter itself (a bare `dsh web`), this plugin
+  // must NOT recurse into itself and re-spawn bridges. The minter sets this
+  // env var on its own process; we detect it and stand down immediately.
+  if (process.env.DSH_PHONE_AS_MINTER) return;
+
   const logger = (ctx && ctx.logger ? ctx.logger("phone-remote") : null) || console;
   const info = (m) => { try { logger.info?.(m); } catch { console.log(m); } };
   const warn = (m) => { try { logger.warn?.(m); } catch { console.warn(m); } };
@@ -53,7 +58,7 @@ export function apply(ctx, config = {}) {
   const env = (k) => (process.env[k] ? Number(process.env[k]) : NaN);
   const cfg = {
     bridgePort: env("DSH_PHONE_BRIDGE_PORT") || Number(config.bridgePort) || 8124,
-    cliPort: env("DSH_PHONE_CLI_PORT") || Number(config.cliPort) || 8123,
+    cliPort: env("DSH_PHONE_CLI_PORT") || Number(config.cliPort) || 8090,
     minter: config.minter !== false,
     trustedHost: String(config.trustedHost || ""),
     serve: process.env.DSH_PHONE_NO_SERVE ? false : config.serve !== false,
@@ -95,39 +100,51 @@ export function apply(ctx, config = {}) {
   // ---- children -------------------------------------------------------
 
   async function spawnBridge() {
-    const script = path.join(pkgDir, "bridge", "dsh-phone-proxy.cjs");
-    // The bridge discovers the app's web port by itself at startup (cookie
-    // probe across the process's listeners — it may host several roots).
-    const fd = openSync(logFile("dsh-phone-remote.log"), "a"); // sync fd: spawn needs it now
-    // hand the resolved ports to the bridge through its env knobs
-    const child = spawn(process.execPath, [script], {
-      stdio: ["ignore", fd, fd],
-      windowsHide: true,
-      env: {
-        ...process.env,
-        DSH_PHONE_PORT: String(cfg.bridgePort),
-        DSH_PHONE_CLI_PORT: String(cfg.cliPort),
-        ...(process.env.DSH_PHONE_CLI_LOG ? { DSH_PHONE_CLI_LOG: process.env.DSH_PHONE_CLI_LOG } : {}),
-      },
-    });
-    closeSync(fd);
-    track("bridge", child, `bridge :${cfg.bridgePort}`);
-    info("bridge started (app port auto-detected)");
-    if (cfg.serve && !serveDone) publishServe();
+    try {
+      const script = path.join(pkgDir, "bridge", "dsh-phone-proxy.cjs");
+      // The bridge discovers the app's web port by itself at startup (cookie
+      // probe across the process's listeners — it may host several roots).
+      const fd = openSync(logFile("dsh-phone-remote.log"), "a"); // sync fd: spawn needs it now
+      // hand the resolved ports to the bridge through its env knobs
+      const child = spawn(process.execPath, [script], {
+        stdio: ["ignore", fd, fd],
+        windowsHide: true,
+        env: {
+          ...process.env,
+          DSH_PHONE_PORT: String(cfg.bridgePort),
+          DSH_PHONE_CLI_PORT: String(cfg.cliPort),
+          ...(process.env.DSH_PHONE_CLI_LOG ? { DSH_PHONE_CLI_LOG: process.env.DSH_PHONE_CLI_LOG } : {}),
+        },
+      });
+      closeSync(fd);
+      track("bridge", child, `bridge :${cfg.bridgePort}`);
+      info("bridge started (app port auto-detected)");
+      if (cfg.serve && !serveDone) publishServe();
+    } catch (e) {
+      warn(`bridge spawn failed (will retry): ${e && e.message}`);
+    }
   }
 
   async function spawnMinter() {
-    const args = ["web", "--host", "127.0.0.1", "--port", String(cfg.cliPort), "--no-open"];
-    if (cfg.trustedHost) args.push("--trusted-host", cfg.trustedHost);
-    // The bridge reads the login token from this log (the `dsh web: …?token=` line).
-    // The stream is truncated so exactly one live token sequence exists at a time,
-    // matching the old `Tee-Object` run the bat file did.
-    const minterLog = process.env.DSH_PHONE_CLI_LOG || logFile("dsh-web-serve.log");
-    const fd = openSync(minterLog, "w"); // truncate: one live token sequence
-    const child = spawn(cfg.dshBin, args, { stdio: ["ignore", fd, fd], windowsHide: true, shell: true });
-    closeSync(fd);
-    track("minter", child, `minter :${cfg.cliPort}`);
-    info(`minter started :${cfg.cliPort}`);
+    try {
+      const args = ["web", "--host", "127.0.0.1", "--port", String(cfg.cliPort), "--no-open"];
+      if (cfg.trustedHost) args.push("--trusted-host", cfg.trustedHost);
+      // The bridge reads the login token from this log (the `dsh web: …?token=` line).
+      // The stream is truncated so exactly one live token sequence exists at a time.
+      const minterLog = process.env.DSH_PHONE_CLI_LOG || logFile("dsh-web-serve.log");
+      const fd = openSync(minterLog, "w"); // truncate: one live token sequence
+      const child = spawn(cfg.dshBin, args, {
+        stdio: ["ignore", fd, fd],
+        windowsHide: true,
+        shell: true,
+        env: { ...process.env, DSH_PHONE_AS_MINTER: "1" },
+      });
+      closeSync(fd);
+      track("minter", child, `minter :${cfg.cliPort}`);
+      info(`minter started :${cfg.cliPort}`);
+    } catch (e) {
+      warn(`minter spawn failed (will retry): ${e && e.message}`);
+    }
   }
 
   function publishServe() {
@@ -178,11 +195,15 @@ export function apply(ctx, config = {}) {
     info("stopped");
   }
 
-  info(`ready (bridge :${cfg.bridgePort}, cli :${cfg.cliPort}, serve ${cfg.serve ? "on" : "off"})`);
-  void watch();
-  const timer = setInterval(() => void watch(), 30000);
-  if (timer.unref) timer.unref();
-  if (ctx && typeof ctx.effect === "function") {
-    ctx.effect(() => () => { clearInterval(timer); disposeAll(); });
+  try {
+    info(`ready (bridge :${cfg.bridgePort}, cli :${cfg.cliPort}, serve ${cfg.serve ? "on" : "off"})`);
+    void watch();
+    const timer = setInterval(() => void watch(), 30000);
+    if (timer.unref) timer.unref();
+    if (ctx && typeof ctx.effect === "function") {
+      ctx.effect(() => () => { clearInterval(timer); disposeAll(); });
+    }
+  } catch (e) {
+    warn(`init error (non-fatal): ${e && e.message}`);
   }
 }

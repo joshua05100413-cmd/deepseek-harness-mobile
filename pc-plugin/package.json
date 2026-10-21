@@ -1,8 +1,38 @@
 {
   "name": "dsh-phone-remote",
   "version": "1.0.0",
-  "description": "DSHgo phone remote (PC side): phone traffic bridge + auto-login + tailscale publish, self-hosted inside dsh",
+  "description": "DSHgo 手机远程（PC 端）：手机流量桥接 + 登录自动签发 + Tailscale 发布，守护整条手机→电脑链路。",
   "type": "module",
   "main": "lib/index.js",
-  "license": "MIT"
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "bridge",
+    "README.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/just-a-FA-for-name/DSHgo.git",
+    "directory": "pc-plugin"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "phone-remote",
+    "dshgo",
+    "tailscale",
+    "bridge"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
 }

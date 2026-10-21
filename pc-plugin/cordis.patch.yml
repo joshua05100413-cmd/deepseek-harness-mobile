@@ -1,0 +1,5 @@
+# dsh-phone-remote bundle layer — 应用顺序在用户 cordis.patch.yml 之前。
+# 插件主体：守护手机远程整条链路（cookie 签发 / 流量桥接 / Tailscale 发布）。
+- insert:
+    - id: phone-remote
+      name: "dsh-phone-remote"

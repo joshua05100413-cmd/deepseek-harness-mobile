@@ -23,7 +23,7 @@ process.on('uncaughtException', (e) => console.error('uncaught:', e && e.message
 process.on('unhandledRejection', (e) => console.error('unhandled:', e && e.message));
 
 const LISTEN_PORT = Number(process.env.DSH_PHONE_PORT) || 8124;
-const CLI_PORT = Number(process.env.DSH_PHONE_CLI_PORT) || 8123; // local `dsh web` instance - performs token exchange
+const CLI_PORT = Number(process.env.DSH_PHONE_CLI_PORT) || 8090; // local `dsh web` instance - performs token exchange
 const AUTHORITY = '127.0.0.1:4505'; // stable identity the app trusts (loopback)
 const DISCOVER = path.join(__dirname, 'find-app-port.ps1');
 const CLI_LOG = process.env.DSH_PHONE_CLI_LOG || require('path').join(require('os').homedir(), '.dsh', 'logs', 'dsh-web-serve.log');
