@@ -52,6 +52,9 @@ public class MainActivity extends Activity {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
 
     private static final int REQ_VPN = 1001;
+    private static final int REQ_FILES = 1003;
+    private android.webkit.ValueCallback<Uri[]> fileChooser;
+    private String mobileUiScript;
 
     private static final int ST_NEED_LOGIN = 0;
     private static final int ST_NEED_VPN = 1;
@@ -82,10 +85,40 @@ public class MainActivity extends Activity {
     private String currentUrl;
     private String appliedTheme;
     private long loadStart;
+    private boolean resumed;
+    private boolean destroyed;
+    private int reconnectAttempts;
+    private long reconnectAt;
+    private boolean networkRecoveryPending;
+    private boolean connectionCheckBusy;
+    private int pageGeneration;
+    private String lastConnectionState = "";
+
+    private boolean canReconnect() {
+        return !pageLoadFailed || (Prefs.get(this, Prefs.AUTO_RECONNECT, true)
+            && android.os.SystemClock.elapsedRealtime() >= reconnectAt);
+    }
+
+    private void requestReconnect() {
+        reconnectAt = 0;
+        if ("zcode".equals(appMode)) zcodeLoadStarted = false;
+        pageLoadFailed = false;
+        pageLoading = false;
+        pageEverLoaded = false;
+        if (web != null) web.stopLoading();
+        poll();
+    }
+
+    private void schedulePoll() {
+        handler.removeCallbacks(ticker);
+        if (resumed && !destroyed) handler.post(ticker);
+    }
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable ticker = new Runnable() {
         @Override public void run() {
+            handler.removeCallbacks(this);
+            if (!resumed || destroyed) return;
             poll();
             handler.postDelayed(this, pageEverLoaded ? 4000 : 1000);
         }
@@ -140,6 +173,7 @@ public class MainActivity extends Activity {
     // ------------------------------------------------------------- splash
 
     private BootAnimView bootView;
+    private boolean bootDismissQueued;
 
     private View buildSplashView() {
         bootView = new BootAnimView(this);
@@ -149,17 +183,22 @@ public class MainActivity extends Activity {
     private void removeBoot() {
         try {
             if (bootView == null || !(bootView.getParent() instanceof ViewGroup)) return;
-            // never cut the choreography short: hold the curtain until the
-            // full pull-out sequence (~5.6s) has played at least once
+            if (bootDismissQueued) return;
+            // Show the logo briefly, then reveal a ready page immediately.
             long elapsed = System.currentTimeMillis() - bootStartMs;
-            if (elapsed < 6500) {
+            if (elapsed < 700) {
+                bootDismissQueued = true;
                 handler.postDelayed(new Runnable() {
-                    @Override public void run() { removeBoot(); }
-                }, 6500 - elapsed);
+                    @Override public void run() {
+                        bootDismissQueued = false;
+                        if (!destroyed) removeBoot();
+                    }
+                }, 700 - elapsed);
                 return;
             }
+            bootDismissQueued = true;
             final ViewGroup p = (ViewGroup) bootView.getParent();
-            bootView.animate().alpha(0f).setDuration(450).withEndAction(new Runnable() {
+            bootView.animate().alpha(0f).setDuration(180).withEndAction(new Runnable() {
                 @Override public void run() {
                     try { p.removeView(bootView); } catch (Exception ignored) {}
                 }
@@ -180,11 +219,18 @@ public class MainActivity extends Activity {
         bar.setBackgroundColor(BAR);
         bar.setGravity(Gravity.CENTER_VERTICAL);
         bar.setPadding(dp(4), dp(3), dp(4), dp(3));
+        sidebarBtn = iconButton(R.drawable.ic_menu, v -> {
+            if (web != null && "dsh".equals(appMode)) {
+                web.evaluateJavascript("window.__dshToggleSidebar&&window.__dshToggleSidebar()", null);
+            }
+        });
+        sidebarBtn.setContentDescription("展开或收起会话侧边栏");
+        bar.addView(sidebarBtn);
 
         LinearLayout titles = new LinearLayout(this);
         titles.setOrientation(LinearLayout.VERTICAL);
         titles.setGravity(Gravity.CENTER_VERTICAL);
-        titles.setPadding(dp(10), 0, 0, 0);
+        titles.setPadding(dp(4), 0, 0, 0);
         LinearLayout switcher = new LinearLayout(this);
         switcher.setOrientation(LinearLayout.HORIZONTAL);
         switcher.setGravity(Gravity.CENTER_VERTICAL);
@@ -221,7 +267,7 @@ public class MainActivity extends Activity {
         bar.addView(iconButton(R.drawable.ic_refresh, new View.OnClickListener() {
             @Override public void onClick(View v) {
                 if (web != null && pageEverLoaded) web.reload();
-                else { pageEverLoaded = false; poll(); }
+                else requestReconnect();
             }
         }));
         globeBtn = iconButton(R.drawable.ic_globe, new View.OnClickListener() {
@@ -328,7 +374,11 @@ public class MainActivity extends Activity {
         iv.setImageResource(res);
         // theme-aware glyph tint: fixed light vectors vanish on light themes
         iv.setColorFilter(TEXT, android.graphics.PorterDuff.Mode.SRC_IN);
-        iv.setPadding(dp(13), dp(12), dp(13), dp(12));
+        iv.setPadding(dp(8), dp(10), dp(8), dp(10));
+        iv.setLayoutParams(new LinearLayout.LayoutParams(dp(40), dp(44)));
+        if (res == R.drawable.ic_refresh) iv.setContentDescription("刷新");
+        if (res == R.drawable.ic_settings) iv.setContentDescription("设置");
+        if (res == R.drawable.ic_globe) iv.setContentDescription("站点小窗");
         iv.setClickable(true);
         iv.setOnClickListener(click);
         iv.setOnTouchListener(new View.OnTouchListener() {
@@ -351,8 +401,7 @@ public class MainActivity extends Activity {
             requestVpn();
             return;
         }
-        pageEverLoaded = false;
-        poll();
+        requestReconnect();
     }
 
     // --------------------------------------------- multi-site aggregation
@@ -522,7 +571,7 @@ public class MainActivity extends Activity {
                 web.stopLoading();
                 web.loadUrl(url);
             }
-            handler.post(ticker);
+            schedulePoll();
         } catch (Exception e) {
             android.widget.Toast.makeText(this, "切换失败: " + e.getMessage(), android.widget.Toast.LENGTH_SHORT).show();
         }
@@ -532,6 +581,7 @@ public class MainActivity extends Activity {
 
     private String appMode = "dsh"; // dsh | zcode
     private TextView pillDsh, pillZcode;
+    private View sidebarBtn;
     private View globeBtn;
     private boolean zcodeLoadStarted = false;
 
@@ -545,8 +595,8 @@ public class MainActivity extends Activity {
     private TextView modePill(String label) {
         TextView tv = new TextView(this);
         tv.setText(label);
-        tv.setTextSize(13);
-        tv.setPadding(dp(11), dp(3), dp(11), dp(3));
+        tv.setTextSize(12);
+        tv.setPadding(dp(8), dp(5), dp(8), dp(5));
         tv.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -558,6 +608,7 @@ public class MainActivity extends Activity {
     private void stylePills() {
         if (pillDsh == null || pillZcode == null) return;
         boolean dsh = "dsh".equals(appMode);
+        if (sidebarBtn != null) sidebarBtn.setVisibility(dsh ? View.VISIBLE : View.GONE);
         GradientDrawable on = new GradientDrawable();
         on.setCornerRadius(dp(14));
         on.setColor(ACCENT);
@@ -577,6 +628,7 @@ public class MainActivity extends Activity {
      */
     private void switchMode(String mode) {
         if (mode == null || mode.equals(appMode)) return;
+        finishFileChooser(null);
         appMode = mode;
         Prefs.get(this).edit().putString(Prefs.MODE, mode).apply();
         stylePills();
@@ -621,12 +673,13 @@ public class MainActivity extends Activity {
             currentUrl = Prefs.effectiveUrl(this);
             zcodeLoadStarted = false;
             serviceStartRequested = false; // re-arm the tunnel
-            handler.post(ticker);
+            schedulePoll();
         }
-        handler.post(ticker);
+        schedulePoll();
     }
 
     private void stopTunnel() {
+        LocalForwarder.stop();
         try {
             Intent i = new Intent(this, TailscaleVpnService.class)
                 .setAction(TailscaleVpnService.ACTION_STOP);
@@ -676,9 +729,60 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_FILES) {
+            Uri[] result = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+            java.util.ArrayList<Uri> readable = new java.util.ArrayList<>();
+            if (result != null) {
+                for (Uri uri : result) {
+                    // SAF grants access to selected content URIs; never accept arbitrary
+                    // file:// paths or web URLs from another app's activity result.
+                    if (uri != null && "content".equals(uri.getScheme())) readable.add(uri);
+                }
+            }
+            finishFileChooser(readable.isEmpty() ? null : readable.toArray(new Uri[0]));
+            return;
+        }
         if (requestCode == REQ_VPN && resultCode == RESULT_OK) {
             startTunnelService();
         }
+    }
+
+    private void finishFileChooser(Uri[] result) {
+        android.webkit.ValueCallback<Uri[]> callback = fileChooser;
+        fileChooser = null;
+        if (callback != null) callback.onReceiveValue(result);
+    }
+
+    private boolean chooseFiles(android.webkit.ValueCallback<Uri[]> callback,
+            WebChromeClient.FileChooserParams params) {
+        finishFileChooser(null);
+        fileChooser = callback;
+        java.util.LinkedHashSet<String> types = new java.util.LinkedHashSet<>();
+        for (String group : params.getAcceptTypes()) {
+            if (group == null) continue;
+            for (String item : group.split(",")) {
+                String type = item.trim().toLowerCase(java.util.Locale.ROOT);
+                if (type.startsWith(".")) {
+                    type = android.webkit.MimeTypeMap.getSingleton()
+                        .getMimeTypeFromExtension(type.substring(1));
+                }
+                if (type != null && type.matches("[a-z0-9.+*-]+/[a-z0-9.+*-]+")) types.add(type);
+            }
+        }
+        Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        pick.addCategory(Intent.CATEGORY_OPENABLE);
+        pick.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        pick.setType(types.size() == 1 ? types.iterator().next() : "*/*");
+        if (types.size() > 1) pick.putExtra(Intent.EXTRA_MIME_TYPES, types.toArray(new String[0]));
+        pick.putExtra(Intent.EXTRA_ALLOW_MULTIPLE,
+            params.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE);
+        try {
+            startActivityForResult(pick, REQ_FILES);
+        } catch (android.content.ActivityNotFoundException e) {
+            finishFileChooser(null);
+            android.widget.Toast.makeText(this, "没有可用的文件选择器", android.widget.Toast.LENGTH_SHORT).show();
+        }
+        return true;
     }
 
     private void startTunnelService() {
@@ -726,7 +830,7 @@ public class MainActivity extends Activity {
         s.setDisplayZoomControls(false);
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setAllowFileAccess(false);
-        s.setAllowContentAccess(false);
+        s.setAllowContentAccess(true); // Read only the content URIs selected through Android's picker.
         // The workbench loads local resources over http://127.0.0.1 (loopback).
         // Browsers whitelist loopback from mixed-content blocking; WebView must
         // be told explicitly, otherwise images say "file service unavailable".
@@ -737,6 +841,18 @@ public class MainActivity extends Activity {
         wv.setLongClickable(false);
 
         wv.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageStarted(WebView view, String url, Bitmap icon) {
+                if (isLogin || destroyed) return;
+                pageGeneration++;
+                connectionCheckBusy = false;
+                networkRecoveryPending = false;
+                state = ST_CONNECTING;
+                pageLoading = true;
+                pageLoadFailed = false;
+                loadStart = System.currentTimeMillis();
+            }
+
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
                 if (isLogin) return false; // login flows anywhere
@@ -761,7 +877,7 @@ public class MainActivity extends Activity {
 
             @Override
             public void onPageFinished(WebView view, String url) {
-                if (isLogin) return;
+                if (isLogin || destroyed) return;
                 pageLoading = false;
                 if (pageLoadFailed) {
                     // error pages also fire onPageFinished — never call that "ready"
@@ -769,13 +885,26 @@ public class MainActivity extends Activity {
                     return;
                 }
                 pageEverLoaded = true;
+                reconnectAttempts = 0;
+                reconnectAt = 0;
                 setState(ST_READY);
                 injectAdaptation();
             }
 
             @Override
             public void onReceivedError(WebView view, WebResourceRequest req, android.webkit.WebResourceError err) {
-                if (!isLogin && req.isForMainFrame()) {
+                if (!isLogin && !destroyed && req.isForMainFrame()) {
+                    pageLoadFailed = true;
+                    pageEverLoaded = false;
+                    pageLoading = false;
+                    setState(ST_ERROR);
+                }
+            }
+
+            @Override
+            public void onReceivedHttpError(WebView view, WebResourceRequest req,
+                    android.webkit.WebResourceResponse response) {
+                if (!isLogin && !destroyed && req.isForMainFrame() && response.getStatusCode() >= 500) {
                     pageLoadFailed = true;
                     pageEverLoaded = false;
                     pageLoading = false;
@@ -790,6 +919,12 @@ public class MainActivity extends Activity {
         });
 
         wv.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onShowFileChooser(WebView view, android.webkit.ValueCallback<Uri[]> callback,
+                    FileChooserParams params) {
+                return chooseFiles(callback, params);
+            }
+
             @Override
             public boolean onConsoleMessage(android.webkit.ConsoleMessage cm) {
                 android.util.Log.i("DSHWeb", cm.messageLevel() + " " + cm.message() + " @" + cm.lineNumber());
@@ -913,164 +1048,22 @@ public class MainActivity extends Activity {
     }
 
     private void injectAdaptation() {
-        // The DSH workbench adaptation (fetch cache, sidebar, dialogs…) targets
-        // the workbench DOM only. ZCode is a foreign SPA — leave it untouched.
         if ("zcode".equals(appMode)) return;
-        boolean autoSidebar = Prefs.get(this, Prefs.AUTO_SIDEBAR, true);
-        String js =
-            "(function(){" +
-            " try{ window.onerror=function(m,s,l){ console.error('DSHJS-ERR '+m+' @'+l); }; }catch(e){}" +
-            " try{ console.error('DSHFEAT worker='+typeof Worker+' sw='+(typeof navigator.serviceWorker)+' sab='+typeof SharedArrayBuffer+' wasm='+typeof WebAssembly+' offscr='+typeof OffscreenCanvas+' fs='+typeof (window.showOpenFilePicker)+' opfs='+(navigator.storage&&navigator.storage.getDirectory?1:0)+' indexeddb='+typeof indexedDB); }catch(e){}" +
-            " try{ var of=window.fetch; window.fetch=function(){ var args=arguments; var u=(args[0]&&args[0].url)||args[0]; var key=null; var isGet=(!args[1]||!args[1].method||String(args[1].method).toUpperCase()==='GET'); if(isGet&&typeof u==='string'&&u.indexOf('/api/')>=0){ key='swr:'+u; } var run=function(n){ return of.apply(window,args).then(function(r){ if(!r.ok) console.error('DSHNET '+r.status+' '+String(u).slice(0,90)); if(key&&r.ok){ try{ r.clone().text().then(function(t){ if(t.length<300000) localStorage.setItem(key,t); }); }catch(e){} } return r; },function(e){ console.error('DSHNET fetch-FAIL '+String(u).slice(0,90)); if(key){ var c=null; try{ c=localStorage.getItem(key); }catch(x){} if(c){ console.error('DSHNET cache-hit (weak-net fallback)'); return Promise.resolve(new Response(c,{status:200,headers:{'content-type':'application/json'}})); } } if(n>0){ return new Promise(function(res){ setTimeout(res,500*(3-n)); }).then(function(){ return run(n-1); }); } throw e; }); }; return run(2); }; }catch(e){}" +
-            " try{ var OW=window.WebSocket; window.WebSocket=function(u,p){ var s=new OW(u,p); s.addEventListener('error',function(){ console.error('DSHNET ws-FAIL '+u); }); return s; }; }catch(e){}" +
-            " if(window.__dshAdapted) return; window.__dshAdapted=true;" +
-            " var m=document.querySelector('meta[name=viewport]');" +
-            " if(m) m.setAttribute('content','width=device-width, initial-scale=1, viewport-fit=cover');" +
-            " var st=document.createElement('style');" +
-            " st.textContent=[" +
-            "  'html{-webkit-text-size-adjust:100%;}'," +
-            "  'body{-webkit-tap-highlight-color:transparent;overscroll-behavior:contain;}'," +
-            "  'input,textarea{font-size:16px !important;}'," +
-            "  '*:not(input):not(textarea):not([contenteditable=\"true\"]){-webkit-user-select:none !important;user-select:none !important;}'," +
-            "  '::-webkit-scrollbar{width:0;height:0;display:none;}'," +
-            "  'textarea{border-radius:12px !important;}'," +
-            "  'button:active,[role=\"button\"]:active,a:active{opacity:.65;transition:opacity .06s !important;}'," +
-            "  'html{scroll-behavior:smooth;}'" +
-            " ].join('\\n');" +
-            " document.head.appendChild(st);" +
-            " var as=document.querySelectorAll('a[target=\"_blank\"]');" +
-            " for(var i=0;i<as.length;i++) as[i].removeAttribute('target');" +
-            " function findToggle(){" +
-            "  var bs=document.querySelectorAll('button,[role=\"button\"]');" +
-            "  for(var i=0;i<bs.length;i++){" +
-            "   var t=(bs[i].getAttribute('aria-label')||'')+(bs[i].getAttribute('title')||'')+(bs[i].textContent||'');" +
-            "   if(t.indexOf('侧边栏')>=0&&t.indexOf('右侧')<0) return bs[i];" +
-            "  } return null; }" +
-            " function sidebarOpen(){" +
-            "  var nav=document.querySelector('nav[aria-label=\"全局面板\"]');" +
-            "  if(nav&&nav.parentElement) return (nav.parentElement.className+'').indexOf('collapsed')<0;" +
-            "  return false; }" +
-            " window.__dshToggleSidebar=function(){var b=findToggle(); if(b){b.click(); return true;} return false;};" +
-            " window.__dshSidebarOpen=sidebarOpen;" +
-            " window.__dshBackAction=function(){ if(sidebarOpen()){ var b=findToggle(); if(b){b.click(); return 1;} } return 0; };" +
-            // ---------- Android drawer behavior: outside-tap closes everything ----------
-            " function visiblePopouts(){" +
-            "  var out=[];" +
-            "  if(Date.now()-(window.__vpCacheT||0)<300&&window.__vpCache){ return window.__vpCache; }" +
-            "  var els=document.querySelectorAll('[role=\"dialog\"],[role=\"menu\"],[class*=\"popover\"],[class*=\"Popover\"],[class*=\"drawer\"],[class*=\"Drawer\"],[class*=\"popup\"],[class*=\"Popup\"],[class*=\"overlay\"],[class*=\"Overlay\"],aside');" +
-            "  for(var i=0;i<els.length;i++){" +
-            "   var r=els[i].getBoundingClientRect();" +
-            "   var cs=getComputedStyle(els[i]);" +
-            "   if(r.width>60&&r.height>80&&r.left<window.innerWidth*0.75&&cs.visibility!=='hidden'&&cs.display!=='none'&&cs.opacity!=='0') out.push(els[i]);" +
-            "  } window.__vpCache=out; window.__vpCacheT=Date.now(); return out; }" +
-            " window.__popsAtTouchStart=0; window.__sidebarAtTouchStart=false; window.__lastTap=0;" +
-            " document.addEventListener('touchstart',function(e){" +
-            "  window.__lastTap=Date.now();" +
-            "  window.__popsAtTouchStart=visiblePopouts().length;" +
-            "  window.__sidebarAtTouchStart=sidebarOpen();" +
-            "  markTouch(e);" +
-            " },true);" +
-            " function closeAllPopouts(x,y){" +
-            "  var opts={bubbles:true,cancelable:true,clientX:x,clientY:y,view:window};" +
-            "  ['pointerdown','mousedown','mouseup','click'].forEach(function(t){" +
-            "   try{ document.dispatchEvent(new MouseEvent(t,opts)); }catch(err){}" +
-            "  });" +
-            "  try{ document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',keyCode:27,which:27,bubbles:true,cancelable:true})); }catch(err){}" +
-            "  if(sidebarOpen()){ var b=findToggle(); if(b) b.click(); }" +
-            "  setTimeout(function(){" +
-            "   if(Date.now()-(window.__lastTap||0)<600) return;" +
-            "   var still=visiblePopouts().length>0||sidebarOpen();" +
-            "   if(still){ var el=document.elementFromPoint(x,y);" +
-            "    if(el){ try{ el.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,clientX:x,clientY:y}));" +
-            "     el.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,clientX:x,clientY:y})); el.click(); }catch(err){} }" +
-            "    if(sidebarOpen()){ var b2=findToggle(); if(b2) b2.click(); } }" +
-            "  },260);" +
-            " }" +
-            " document.addEventListener('touchend',function(e){ try{" +
-            "  var popsBefore=window.__popsAtTouchStart||0;" +
-            "  var sidebarBefore=window.__sidebarAtTouchStart;" +
-            "  var x=(e.changedTouches&&e.changedTouches[0])?e.changedTouches[0].clientX:0;" +
-            "  var y=(e.changedTouches&&e.changedTouches[0])?e.changedTouches[0].clientY:0;" +
-            "  var t=e.target;" +
-            "  try{ var fp=t; while(fp&&fp!==document.body){ var cs=getComputedStyle(fp);" +
-            "   if(cs.position==='absolute'||cs.position==='fixed'){ return; } fp=fp.parentElement; } }catch(err){}" +
-            "  if(sidebarBefore&&sidebarOpen()){" +
-            "   var b=findToggle();" +
-            "   if(b&&x>b.getBoundingClientRect().right+10){" +
-            "    setTimeout(function(){ if(sidebarOpen()){ var bb=findToggle(); if(bb) bb.click(); } },50);" +
-            "    return;" +
-            "   }" +
-            "  }" +
-            "  if(popsBefore===0) return;" +
-            "  var pops=visiblePopouts();" +
-            "  if(pops.length===0) return;" +
-            "  var inPop=false;" +
-            "  for(var i=0;i<pops.length;i++){ if(pops[i]!==t&&pops[i].contains(t)) inPop=true; }" +
-            "  if(inPop) return;" +
-            "  try{ document.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,clientX:x,clientY:y})); }catch(err){}" +
-            "  try{ document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',keyCode:27,bubbles:true})); }catch(err){}" +
-            " }catch(err){} },true);" +
-            // Minimal, surgical dialog fix: ONLY stack squeezed two-column rows
-            // inside *_panel dialogs. Nothing else is touched.
-            " function fixDialogs(){" +
-            "  try{" +
-            "   if(window.innerWidth>=760) return;" +
-            "   var stackRow=function(el){" +
-            "    try{" +
-            "     var cs=getComputedStyle(el);" +
-            "     if(cs.display==='flex'&&cs.flexDirection.indexOf('row')===0&&el.children.length>=2){" +
-            "      var c0=el.children[0].getBoundingClientRect();" +
-            "      if(c0.width>100&&c0.height>150){" +
-            "       el.style.flexDirection='column';" +
-            "       el.style.maxHeight='92vh'; el.style.overflowY='auto';" +
-            "       for(var k=0;k<el.children.length;k++){ el.children[k].style.width='100%'; el.children[k].style.minWidth='0'; el.children[k].style.maxWidth='100%'; el.children[k].style.height='auto'; el.children[k].style.flex='0 0 auto'; }" +
-            "       return true;" +
-            "      }" +
-            "     }" +
-            "    }catch(err){}" +
-            "    return false; };" +
-            "   var els=document.querySelectorAll('[class*=\"_panel\"],[class*=\"_root\"],[role=\"dialog\"]');" +
-            "   for(var i=0;i<els.length;i++){" +
-            "    var p=els[i];" +
-            "    if(p.querySelector&&p.querySelector('nav[aria-label=\"全局面板\"]')) continue;" +
-            "    stackRow(p);" +
-            "    var rows=p.getElementsByTagName('*');" +
-            "    for(var j=0;j<rows.length;j++){ stackRow(rows[j]); }" +
-            "   }" +
-            "  }catch(e){}" +
-            " }" +
-            " try{ new MutationObserver(function(){ if(window.__fdT) return; window.__fdT=setTimeout(function(){ window.__fdT=null; fixDialogs(); },600); }).observe(document.body,{childList:true,subtree:true}); }catch(e){}" +
-            " setTimeout(fixDialogs,1500);" +
-            " try{ new MutationObserver(function(){ if(window.__rcT) return; window.__rcT=setTimeout(function(){ window.__rcT=null; try{ if(document.body&&/(连接异常|连接已断开|请重试|重新连接|网络错误)/.test(document.body.innerText||'')){ var now=Date.now(); if(now-(window.__lastRecover||0)>20000){ window.__lastRecover=now; var bs=document.querySelectorAll('button,[role=\"button\"]'); var hit=false; for(var i=0;i<bs.length;i++){ var t=(bs[i].textContent||''); if(/重试|重连|重新连接|刷新/.test(t)){ bs[i].click(); hit=true; break; } } if(!hit){ location.reload(); } } } }catch(e){} },800); }).observe(document.body,{childList:true,subtree:true,characterData:true}); }catch(e){}" +
-            // connection state beacon for the native shell (visible status dot)
-            " try{ setInterval(function(){ try{ var st='ok'; var txt=(document.body&&document.body.innerText)||'';" +
-            "  if(/连接异常|已断开|连接失败|网络错误|无法连接/.test(txt)) st='bad';" +
-            "  else if(/重连中|连接中|正在加载|加载中|重试/.test(txt)) st='weak';" +
-            "  window.__connState=st; }catch(e){} },4000); }catch(e){}" +
-            " function isEditable(t){ return t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable); }" +
-            " function markTouch(e){" +
-            "  var t=e.target;" +
-            "  while(t){ if(isEditable(t)){ window.__lastInputTouch=Date.now(); return; } t=t.parentElement; }" +
-            " }" +
-            " document.addEventListener('touchstart',markTouch,true);" +
-            " document.addEventListener('mousedown',markTouch,true);" +
-            " var origFocus=HTMLElement.prototype.focus;" +
-            " HTMLElement.prototype.focus=function(){" +
-            "  if(isEditable(this) && Date.now()-(window.__lastInputTouch||0)>500) return;" +
-            "  return origFocus.apply(this,arguments);" +
-            " };" +
-            " document.addEventListener('focusin',function(e){" +
-            "  if(isEditable(e.target) && Date.now()-(window.__lastInputTouch||0)>500){ try{e.target.blur();}catch(x){} }" +
-            " },true);" +
-            (autoSidebar ?
-            " try{" +
-            "  if(window.innerWidth<760 && !sessionStorage.__dshSB){" +
-            "   sessionStorage.__dshSB='1';" +
-            "   setTimeout(function(){var b=findToggle(); if(b){var t=(b.getAttribute('aria-label')||'')+(b.textContent||'');" +
-            "    if(t.indexOf('收起')>=0) b.click();}},600);" +
-            "  } }catch(e){}" : "") +
-            "})();";
-        web.evaluateJavascript(js, null);
+        try {
+            if (mobileUiScript == null) {
+                try (InputStream in = getResources().openRawResource(R.raw.mobile_ui);
+                     java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
+                    byte[] buffer = new byte[8192];
+                    int count;
+                    while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+                    mobileUiScript = out.toString("UTF-8");
+                }
+            }
+            web.evaluateJavascript("window.__dshAutoSidebar="
+                + Prefs.get(this, Prefs.AUTO_SIDEBAR, true) + ";" + mobileUiScript, null);
+        } catch (Exception e) {
+            android.util.Log.w("DSHWeb", "mobile UI setup failed", e);
+        }
     }
 
     // ------------------------------------------------------- connection
@@ -1094,7 +1087,7 @@ public class MainActivity extends Activity {
     private boolean wideDialog = false;
 
     private void poll() {
-        if (mainRoot == null) return;
+        if (mainRoot == null || destroyed || !resumed) return;
         // safety: never trap the user behind the boot curtain for good
         if (bootView != null && bootStartMs > 0
             && System.currentTimeMillis() - bootStartMs > 30000) {
@@ -1115,14 +1108,10 @@ public class MainActivity extends Activity {
                 pageLoadFailed = false;
                 web.loadUrl(zu);
             } else if (pageLoadFailed && !pageLoading) {
+                if (!canReconnect()) return;
                 pageLoading = true;
                 pageLoadFailed = false;
-                handler.postDelayed(new Runnable() {
-                    @Override public void run() {
-                        if (!"zcode".equals(appMode) || web == null) return;
-                        web.loadUrl(currentUrl);
-                    }
-                }, 3000);
+                web.loadUrl(currentUrl);
             }
             return;
         }
@@ -1228,22 +1217,24 @@ public class MainActivity extends Activity {
                 actionBtn.setVisibility(View.GONE);
                 setDot(0xFFF5C542);
                 Discovery.find(tunnel, new Discovery.Callback() {
-                    @Override public void onFound(String url) {
-                        discoveryRunning = false;
-                        Prefs.get(MainActivity.this).edit().putString(Prefs.DISCOVERED_URL, url).apply();
-                        currentUrl = url;
+                    @Override public void onFound(final String url) {
                         runOnUiThread(new Runnable() {
                             @Override public void run() {
+                                discoveryRunning = false;
+                                if (destroyed || !"dsh".equals(appMode)) return;
+                                Prefs.get(MainActivity.this).edit().putString(Prefs.DISCOVERED_URL, url).apply();
+                                currentUrl = url;
                                 statusSub.setText("已发现远程工作台，正在载入…");
                             }
                         });
                     }
 
                     @Override public void onFailed(final String reason) {
-                        discoveryRunning = false;
-                        lastDiscoveryFail = System.currentTimeMillis();
                         runOnUiThread(new Runnable() {
                             @Override public void run() {
+                                discoveryRunning = false;
+                                if (destroyed || !"dsh".equals(appMode)) return;
+                                lastDiscoveryFail = System.currentTimeMillis();
                                 statusSub.setText(reason + "，自动重试中…");
                             }
                         });
@@ -1254,17 +1245,37 @@ public class MainActivity extends Activity {
         }
 
         currentUrl = Prefs.effectiveUrl(this);
-        if (pageEverLoaded && state == ST_READY) {
-            // live connection quality: read the page's own state beacon
-            web.evaluateJavascript("window.__connState||'ok'", new android.webkit.ValueCallback<String>() {
+        if (pageEverLoaded && !pageLoading) {
+            // A temporary tunnel state must not make a loaded workbench fall
+            // through into loadUrl(), losing its draft and live session.
+            if (connectionCheckBusy) return;
+            connectionCheckBusy = true;
+            final int generation = pageGeneration;
+            final boolean autoReconnect = Prefs.get(this, Prefs.AUTO_RECONNECT, true);
+            String recovery = "";
+            if (networkRecoveryPending) {
+                networkRecoveryPending = false;
+                web.setNetworkAvailable(true);
+                recovery = "window.__dshNetworkChanged&&window.__dshNetworkChanged(true);";
+            }
+            web.evaluateJavascript(recovery + "window.__dshConnectionState?window.__dshConnectionState("
+                + autoReconnect + "):'weak'", new android.webkit.ValueCallback<String>() {
                 @Override public void onReceiveValue(String v) {
-                    if (subtitleView == null) return;
+                    if (generation != pageGeneration) return;
+                    connectionCheckBusy = false;
+                    if (subtitleView == null || destroyed || !resumed) return;
                     String s = String.valueOf(v).replace("\"", "").trim();
+                    if (!s.equals(lastConnectionState)) {
+                        android.util.Log.i("DSHConnection", "state=" + s);
+                        lastConnectionState = s;
+                    }
+                    state = ST_READY;
+                    overlay.setVisibility(View.GONE);
                     if ("bad".equals(s)) {
-                        subtitleView.setText("连接异常 · 自动重连中");
+                        subtitleView.setText(autoReconnect ? "连接异常 · 自动重连中" : "连接异常");
                         setDot(0xFFFF5C5C);
-                    } else if ("weak".equals(s)) {
-                        subtitleView.setText("网络波动中");
+                    } else if (!"ok".equals(s)) {
+                        subtitleView.setText("reconnecting".equals(s) ? "正在恢复连接…" : "正在检查连接…");
                         setDot(0xFFF5C542);
                     } else {
                         subtitleView.setText("已连接");
@@ -1290,24 +1301,18 @@ public class MainActivity extends Activity {
             // watchdog: a load stuck too long gets restarted (slow relays, drops),
             // but never while the user is actively typing
             if (System.currentTimeMillis() - loadStart > 45000) {
+                web.stopLoading();
                 pageLoading = false;
-                statusSub.setText("响应较慢，正在重连…");
-                handler.post(new Runnable() {
-                    @Override public void run() {
-                        if (!pageEverLoaded && !pageLoading
-                            && System.currentTimeMillis() - (web != null ? 0 : 0) >= 0) {
-                            pageLoading = true;
-                            loadStart = System.currentTimeMillis();
-                            web.reload();
-                        }
-                    }
-                });
+                pageLoadFailed = true;
+                pageEverLoaded = false;
+                setState(ST_ERROR);
             }
             return;
         }
 
         // Tunnel + endpoint are known: hand straight to the WebView, whose own
         // error handling covers slow links and temporary unreachability.
+        if (!canReconnect()) return;
         pageLoading = true;
         pageLoadFailed = false;
         loadStart = System.currentTimeMillis();
@@ -1340,16 +1345,15 @@ public class MainActivity extends Activity {
     private boolean bootRevealed = false;
     private long bootStartMs;
 
-    /** Boot curtain: let the full choreography play, then reveal the action UI. */
+    /** Login/errors should become actionable as soon as the logo has appeared. */
     private void revealBootAfterAnim() {
         if (bootRevealed) return;
         bootRevealed = true;
-        handler.postDelayed(new Runnable() {
-            @Override public void run() { removeBoot(); }
-        }, 6200);
+        removeBoot();
     }
 
     private void setState(int st) {
+        boolean newError = st == ST_ERROR && state != ST_ERROR;
         state = st;
         if (bootView != null) {
             bootView.setStatus(st == ST_NEED_LOGIN ? "请登录 Tailscale 账号"
@@ -1395,15 +1399,9 @@ public class MainActivity extends Activity {
             actionBtn.setVisibility(View.VISIBLE);
             actionBtn.setText("立即重连");
             setDot(0xFFFF5C5C);
-            if (Prefs.get(this, Prefs.AUTO_RECONNECT, true)) {
-                handler.postDelayed(new Runnable() {
-                    @Override public void run() {
-                        if (state == ST_ERROR) {
-                            pageEverLoaded = false;
-                            poll();
-                        }
-                    }
-                }, 5000);
+            if (newError) {
+                long delay = Math.min(30000L, 2000L << Math.min(reconnectAttempts++, 4));
+                reconnectAt = android.os.SystemClock.elapsedRealtime() + delay + (long)(Math.random() * 500);
             }
         }
     }
@@ -1432,12 +1430,15 @@ public class MainActivity extends Activity {
                 @Override public void onAvailable(android.net.Network n) {
                     handler.post(new Runnable() {
                         @Override public void run() {
-                            if (mainRoot == null) return;
-                            if (!pageEverLoaded) {
-                                pageLoading = false; // allow an immediate reconnect
+                            if (mainRoot == null || destroyed) return;
+                            if (pageEverLoaded) networkRecoveryPending = true;
+                            if (!resumed) return;
+                            if (pageEverLoaded && !pageLoading) {
+                                schedulePoll();
+                            }
+                            if (!pageEverLoaded && !pageLoading) {
+                                reconnectAt = 0;
                                 poll();
-                            } else if (subtitleView != null && !"已连接".equals(subtitleView.getText())) {
-                                subtitleView.setText("已连接"); // restore after a network switch
                             }
                         }
                     });
@@ -1446,8 +1447,9 @@ public class MainActivity extends Activity {
                 @Override public void onLost(android.net.Network n) {
                     handler.post(new Runnable() {
                         @Override public void run() {
-                            if (mainRoot != null && pageEverLoaded) {
-                                subtitleView.setText("网络切换中…");
+                            if (!destroyed && mainRoot != null && pageEverLoaded) {
+                                networkRecoveryPending = true;
+                                if (resumed) subtitleView.setText("网络切换中…");
                             }
                         }
                     });
@@ -1503,6 +1505,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        resumed = true;
         String t = Prefs.get(this).getString(Prefs.THEME, "midnight");
         if (appliedTheme != null && !appliedTheme.equals(t)) {
             recreate(); // theme changed in settings: rebuild every surface
@@ -1514,24 +1517,40 @@ public class MainActivity extends Activity {
         }
         applyWindowPrefs();
         applySiteSwitch();
+        if (web != null && pageEverLoaded && "dsh".equals(appMode)) {
+            web.evaluateJavascript("window.__dshNetworkChanged&&window.__dshNetworkChanged();"
+                + "window.__dshSetAutoSidebar&&window.__dshSetAutoSidebar("
+                + Prefs.get(this, Prefs.AUTO_SIDEBAR, true) + ")", null);
+        }
         String url = Prefs.effectiveUrl(this);
         if (mainRoot != null && "dsh".equals(appMode) && !url.equals(currentUrl) && pageEverLoaded) {
             currentUrl = url;
             pageLoadFailed = false;
             web.loadUrl(currentUrl);
         }
-        handler.post(ticker);
+        schedulePoll();
     }
 
     @Override
     protected void onPause() {
         super.onPause();
+        resumed = false;
         if (web != null) web.onPause();
         handler.removeCallbacks(ticker);
     }
 
     @Override
     protected void onDestroy() {
+        destroyed = true;
+        finishFileChooser(null);
+        handler.removeCallbacksAndMessages(null);
+        if (netCb != null) {
+            try {
+                ((android.net.ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE))
+                    .unregisterNetworkCallback(netCb);
+            } catch (Exception ignored) {}
+        }
+        removeSitePopup();
         super.onDestroy();
         if (web != null) web.destroy();
         if (loginWeb != null) loginWeb.destroy();

@@ -24,18 +24,34 @@ public final class LocalForwarder {
     private static ServerSocket server;
     private static Thread thread;
     private static volatile boolean running;
+    private static String currentHost;
+    private static final java.util.Set<Socket> sockets = new java.util.HashSet<>();
 
     /** targetHost: the tailnet hostname of the PC (e.g. the discovered endpoint host). */
     public static synchronized void start(final String targetHost) {
-        if (running) return;
+        if (targetHost == null || targetHost.isEmpty()) return;
+        if (running && targetHost.equals(currentHost)) return;
+        stop();
+        final ServerSocket listener;
+        try {
+            listener = new ServerSocket(LOCAL_PORT, 32, InetAddress.getByName("127.0.0.1"));
+        } catch (Exception e) {
+            Log.w(TAG, "listen failed: " + e.getMessage());
+            return;
+        }
+        server = listener;
+        currentHost = targetHost;
         running = true;
         thread = new Thread(new Runnable() {
             @Override public void run() {
                 try {
-                    server = new ServerSocket(LOCAL_PORT, 32, InetAddress.getByName("127.0.0.1"));
                     Log.i(TAG, "listening 127.0.0.1:" + LOCAL_PORT + " -> " + targetHost + ":" + LOCAL_PORT);
-                    while (running) {
-                        final Socket client = server.accept();
+                    while (!listener.isClosed()) {
+                        final Socket client = listener.accept();
+                        synchronized (LocalForwarder.class) {
+                            if (server != listener) { closeQuietly(client); break; }
+                            sockets.add(client);
+                        }
                         new Thread(new Runnable() {
                             @Override public void run() {
                                 pipe(client, targetHost);
@@ -43,12 +59,12 @@ public final class LocalForwarder {
                         }).start();
                     }
                 } catch (Exception e) {
-                    Log.w(TAG, "server failed: " + e.getMessage() + " (will self-heal)");
-                    running = false; // let the next poll() re-arm us
-                    try {
-                        if (server != null) server.close();
-                    } catch (Exception ignored) {}
-                    server = null;
+                    if (!listener.isClosed()) Log.w(TAG, "server failed: " + e.getMessage());
+                } finally {
+                    synchronized (LocalForwarder.class) {
+                        // A previous listener must never tear down its replacement.
+                        if (server == listener) stop();
+                    }
                 }
             }
         }, "dsh-local-forwarder");
@@ -62,23 +78,35 @@ public final class LocalForwarder {
             if (server != null) server.close();
         } catch (Exception ignored) {}
         server = null;
+        currentHost = null;
+        for (Socket socket : sockets) closeQuietly(socket);
+        sockets.clear();
     }
 
     private static void pipe(Socket client, String targetHost) {
         Socket upstream = null;
         try {
             client.setTcpNoDelay(true);
+            client.setKeepAlive(true);
+            client.setSoTimeout(15000);
             InetAddress ip = InetAddress.getByName(targetHost); // resolves via MagicDNS in the tunnel
             // Connect through Tailscale Serve on 443 (TLS+SNI): it bypasses the
             // PC's firewall (which blocks raw listeners) and needs no open ports.
             javax.net.ssl.SSLSocketFactory f = (javax.net.ssl.SSLSocketFactory) javax.net.ssl.SSLSocketFactory.getDefault();
             javax.net.ssl.SSLSocket ssl = (javax.net.ssl.SSLSocket) f.createSocket();
+            upstream = ssl;
+            synchronized (LocalForwarder.class) {
+                if (!sockets.contains(client)) { closeQuietly(ssl); return; }
+                sockets.add(ssl);
+            }
             javax.net.ssl.SSLParameters sp = new javax.net.ssl.SSLParameters();
             sp.setServerNames(java.util.Collections.singletonList(new javax.net.ssl.SNIHostName(targetHost)));
             ssl.setSSLParameters(sp);
+            ssl.setSoTimeout(15000);
             ssl.connect(new java.net.InetSocketAddress(ip, 443), 6000);
             ssl.setTcpNoDelay(true);
-            upstream = ssl;
+            ssl.setKeepAlive(true);
+            ssl.startHandshake();
             upstream.setTcpNoDelay(true);
             // The local service validates the handshake's Origin/Host (it only
             // trusts loopback), so rewrite those headers to 127.0.0.1 before
@@ -88,12 +116,13 @@ public final class LocalForwarder {
             int b;
             while ((b = cin.read()) >= 0) {
                 hs.write(b);
-                if (hs.size() > 16384) break;
+                if (hs.size() > 16384) throw new java.io.IOException("request headers too large");
                 byte[] arr = hs.toByteArray();
                 int n = arr.length;
                 if (n >= 4 && arr[n - 1] == 10 && arr[n - 2] == 13 && arr[n - 3] == 10 && arr[n - 4] == 13) break;
             }
             String head = hs.toString("ISO-8859-1");
+            if (!head.endsWith("\r\n\r\n")) throw new java.io.IOException("incomplete request headers");
             head = head.replaceAll("(?im)^Origin: .*$", "Origin: http://127.0.0.1:" + LOCAL_PORT);
             head = head.replaceAll("(?im)^Host: .*$", "Host: 127.0.0.1:" + LOCAL_PORT);
             // route through the bridge's /__insp endpoint (it reaches the PC's
@@ -102,15 +131,17 @@ public final class LocalForwarder {
             java.io.OutputStream uout = upstream.getOutputStream();
             uout.write(head.getBytes("ISO-8859-1"));
             uout.flush();
-            pump(cin, uout);
-            pump(upstream.getInputStream(), client.getOutputStream());
+            client.setSoTimeout(0);
+            upstream.setSoTimeout(0);
+            pump(cin, uout, client, upstream);
+            pump(upstream.getInputStream(), client.getOutputStream(), client, upstream);
         } catch (Exception e) {
-            closeQuietly(client);
-            closeQuietly(upstream);
+            closePair(client, upstream);
         }
     }
 
-    private static void pump(final InputStream in, final OutputStream out) {
+    private static void pump(final InputStream in, final OutputStream out,
+            final Socket client, final Socket upstream) {
         Thread t = new Thread(new Runnable() {
             @Override public void run() {
                 byte[] buf = new byte[16384];
@@ -122,7 +153,7 @@ public final class LocalForwarder {
                     }
                 } catch (Exception ignored) {
                 } finally {
-                    try { out.close(); } catch (Exception ignored) {}
+                    closePair(client, upstream);
                 }
             }
         }, "dsh-forward-pump");
@@ -134,5 +165,12 @@ public final class LocalForwarder {
         try {
             if (s != null) s.close();
         } catch (Exception ignored) {}
+    }
+
+    private static synchronized void closePair(Socket client, Socket upstream) {
+        closeQuietly(client);
+        closeQuietly(upstream);
+        sockets.remove(client);
+        sockets.remove(upstream);
     }
 }

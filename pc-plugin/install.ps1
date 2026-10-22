@@ -15,7 +15,9 @@ foreach ($part in @("package.json", "cordis.patch.yml", "lib", "bridge")) {
   $s = Join-Path $src $part
   $d = Join-Path $dest $part
   if (Test-Path $s -PathType Container) {
-    Copy-Item $s $d -Recurse -Force
+    New-Item -ItemType Directory -Force -Path $d | Out-Null
+    # Copy contents, not the directory itself: updates must not create lib/lib or bridge/bridge.
+    Get-ChildItem -LiteralPath $s -Force | Copy-Item -Destination $d -Recurse -Force
   } else {
     Copy-Item $s $d -Force
   }

@@ -126,7 +126,7 @@ public class SettingsActivity extends Activity {
             Prefs.get(this, Prefs.FULLSCREEN, false), Prefs.FULLSCREEN);
         switchRow(content, "屏幕常亮", "监控场景下不自动息屏",
             Prefs.get(this, Prefs.KEEP_SCREEN, true), Prefs.KEEP_SCREEN);
-        switchRow(content, "窄屏自动收起侧边栏", "【未实现】预留开关，开关不影响使用；后续版本补齐",
+        switchRow(content, "窄屏自动收起侧边栏", "默认收起，点左上角图标展开；选择会话或点空白处后收起",
             Prefs.get(this, Prefs.AUTO_SIDEBAR, true), Prefs.AUTO_SIDEBAR);
         switchRow(content, "桌面版模式", "以桌面浏览器布局渲染（适合平板/大屏）",
             Prefs.get(this, Prefs.DESKTOP_UA, false), Prefs.DESKTOP_UA);
@@ -255,7 +255,7 @@ public class SettingsActivity extends Activity {
         row.addView(brand);
 
         TextView ver = new TextView(this);
-        ver.setText("DSHgo  v1.0 · 构建 1020.4");
+        ver.setText("DSHgo  v1.1");
         ver.setTextColor(DIM);
         ver.setTextSize(12.5f);
         ver.setPadding(0, dp(12), 0, 0);
@@ -721,7 +721,7 @@ public class SettingsActivity extends Activity {
         "· 其它异常：设置 → 连接诊断，按提示排查。\n\n" +
         "【设置项说明】\n" +
         "连接：登录状态、目标服务器、自动发现、诊断。\n" +
-        "显示：网页缩放、全屏、常亮、窄屏自动收起侧边栏（未实现，开关不影响使用）、桌面版模式。\n" +
+        "显示：网页缩放、全屏、常亮、窄屏自动收起侧边栏、桌面版模式。\n" +
         "行为：返回键、外链处理、断线重连。\n" +
         "数据：清缓存、清凭证。\n" +
         "关于：版本、作者 Fa2517、开源说明。";

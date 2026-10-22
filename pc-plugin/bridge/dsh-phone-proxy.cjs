@@ -16,6 +16,7 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+const { pipeline } = require('stream');
 const { execFile } = require('child_process');
 
 // A proxy must never die: log and keep serving.
@@ -30,7 +31,16 @@ const CLI_LOG = process.env.DSH_PHONE_CLI_LOG || require('path').join(require('o
 const COOKIE_ATTRS = '; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax';
 let appPort = Number(process.argv[2]) || 4505;
 
-async function discoverAppPort() {
+let discoveryPromise = null;
+function discoverAppPort() {
+  // All failing requests share one scan instead of spawning a PowerShell scan each.
+  if (!discoveryPromise) {
+    discoveryPromise = scanAppPort().finally(() => { discoveryPromise = null; });
+  }
+  return discoveryPromise;
+}
+
+async function scanAppPort() {
   const run = () => new Promise((resolve) => {
     execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', DISCOVER], { timeout: 10000 }, async (err, out) => {
       const cands = String(out || '').split(/\s+/).map((x) => parseInt(x, 10)).filter((n) => Number.isFinite(n) && n > 0);
@@ -132,6 +142,8 @@ function rewriteSetCookie(headers) {
 }
 
 function waitingPage(res, note) {
+  if (res.destroyed || res.writableEnded) return;
+  if (res.headersSent) { res.destroy(); return; }
   res.writeHead(503, { 'content-type': 'text/html; charset=utf-8' });
   res.end(`<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta http-equiv="refresh" content="5"><title>等待桌面 App</title>
@@ -142,24 +154,32 @@ function waitingPage(res, note) {
 }
 
 function forward(req, res, targetPort, retried) {
+  if (res.destroyed || res.writableEnded) return;
+  // A consumed request body cannot be replayed. Never retry commands/uploads.
+  const canRetry = !retried && (req.method === 'GET' || req.method === 'HEAD')
+    && !req.headers['transfer-encoding'] && !Number(req.headers['content-length']);
   const upstream = http.request(
     { host: '127.0.0.1', port: targetPort, method: req.method, path: req.url, headers: rewriteHeaders(req.headers) },
     (up) => {
+      upstream.setTimeout(0);
+      up.on('error', () => res.destroy());
+      up.on('aborted', () => res.destroy());
       const headers0 = { ...up.headers };
       const type0 = String(headers0['content-type'] || '');
       // A 401 JSON from the wrong web root (another listener of the app) looks
       // identical to a real auth failure to the phone. Re-discover the right
       // root once before surfacing it.
-      if (!retried && up.statusCode === 401 && /json/.test(type0)) {
+      if (canRetry && up.statusCode === 401 && /json/.test(type0)) {
         const chunks = [];
         up.on('data', (c) => chunks.push(c));
         up.on('end', async () => {
           const body = Buffer.concat(chunks).toString('utf8');
           if (/Authorization bearer|invalid_api_key|"unauthorized"/i.test(body)) {
             const p = await discoverAppPort();
-            if (p && p !== targetPort) return forward(req, res, p, true);
+            if (p && p !== targetPort && !res.destroyed) return forward(req, res, p, true);
           }
           const h = { ...headers0, 'cross-origin-resource-policy': 'cross-origin' };
+          if (res.destroyed) return;
           res.writeHead(up.statusCode, h);
           res.end(Buffer.concat(chunks));
         });
@@ -167,7 +187,6 @@ function forward(req, res, targetPort, retried) {
       }
       const headers = rewriteSetCookie({ ...up.headers });
       const type = String(headers['content-type'] || '');
-      const compressible = /text\/|javascript|json|xml|svg/.test(type);
       const wantsGzip = /gzip/.test(String(req.headers['accept-encoding'] || ''));
       const enc = String(headers['content-encoding'] || '').toLowerCase();
       // Enable SharedArrayBuffer (the file-resource/WASM service needs it):
@@ -184,31 +203,36 @@ function forward(req, res, targetPort, retried) {
       // relay until the client aborts. Compress it here - raw bytes only, no
       // content modification, so nothing can be corrupted.
       const bigType = /json|text|javascript|xml/.test(type);
-      if (!enc && wantsGzip && bigType) {
-        const chunks = [];
-        up.on('data', (c) => chunks.push(c));
-        up.on('end', () => {
-          const raw = Buffer.concat(chunks);
-          const h = { ...headers };
-          delete h['content-length'];
-          h['content-encoding'] = 'gzip';
-          res.writeHead(up.statusCode, h);
-          res.end(zlib.gzipSync(raw, { level: 6 }));
-        });
+      const streaming = /event-stream|ndjson|json-seq/i.test(type);
+      if (!enc && wantsGzip && bigType && !streaming && req.method !== 'HEAD'
+          && up.statusCode !== 204 && up.statusCode !== 304
+          && !headers['content-range'] && !/no-transform/i.test(headers['cache-control'] || '')) {
+        delete headers['content-length'];
+        headers['content-encoding'] = 'gzip';
+        headers.vary = headers.vary ? headers.vary + ', Accept-Encoding' : 'Accept-Encoding';
+        res.writeHead(up.statusCode, headers);
+        // Bounded memory, backpressure, and prompt delivery even for a long-lived body.
+        pipeline(up, zlib.createGzip({ flush: zlib.constants.Z_SYNC_FLUSH }), res, () => {});
         return;
       }
       res.writeHead(up.statusCode, headers);
+      if (streaming) res.flushHeaders();
       up.pipe(res);
       void enc;
     }
   );
   upstream.on('error', async (e) => {
-    if (!retried && (e.code === 'ECONNREFUSED' || e.code === 'ECONNRESET')) {
+    if (res.destroyed || res.writableEnded) return;
+    if (canRetry && !res.headersSent && (e.code === 'ECONNREFUSED' || e.code === 'ECONNRESET')) {
       return forward(req, res, await discoverAppPort(), true);
     }
     waitingPage(res);
   });
-  req.pipe(upstream);
+  upstream.setTimeout(30000, () => upstream.destroy(new Error('upstream response timeout')));
+  res.once('close', () => upstream.destroy());
+  req.once('aborted', () => upstream.destroy());
+  if (retried) upstream.end();
+  else req.pipe(upstream);
 }
 
 // The rewritten /__insp path routes to the app's local resource/inspector port.
@@ -379,7 +403,22 @@ function proxyUpgrade(req, socket, head, port, pathOverride, hostHeader) {
   headers['upgrade'] = req.headers.upgrade || 'websocket';
   if (hostHeader) headers['host'] = hostHeader;
   const r = http.request({ host: '127.0.0.1', port, method: req.method, path: pathOverride || req.url, headers });
+  let peer = null;
+  const close = () => {
+    r.destroy();
+    if (peer) peer.destroy();
+    socket.destroy();
+  };
+  socket.once('error', close);
+  socket.once('close', close);
+  r.setTimeout(15000, close);
   r.on('upgrade', (res, upstream, headBuf) => {
+    peer = upstream;
+    r.setTimeout(0);
+    upstream.setTimeout(0);
+    upstream.once('error', close);
+    upstream.once('close', close);
+    if (socket.destroyed) { close(); return; }
     const lines = ['HTTP/1.1 101 Switching Protocols'];
     for (const [k, v] of Object.entries(res.headers)) {
       lines.push(`${k}: ${Array.isArray(v) ? v.join(', ') : v}`);
@@ -393,6 +432,8 @@ function proxyUpgrade(req, socket, head, port, pathOverride, hostHeader) {
     socket.pipe(upstream);
   });
   r.on('response', (res) => {
+    r.setTimeout(0);
+    res.once('error', close);
     const lines = [`HTTP/1.1 ${res.statusCode} ${res.statusMessage || ''}`];
     for (const [k, v] of Object.entries(res.headers)) {
       lines.push(`${k}: ${Array.isArray(v) ? v.join(', ') : v}`);
@@ -400,8 +441,7 @@ function proxyUpgrade(req, socket, head, port, pathOverride, hostHeader) {
     socket.write(lines.join('\r\n') + '\r\n\r\n');
     res.pipe(socket);
   });
-  r.on('error', () => socket.destroy());
-  socket.on('error', () => r.destroy());
+  r.on('error', close);
   r.end();
 }
 

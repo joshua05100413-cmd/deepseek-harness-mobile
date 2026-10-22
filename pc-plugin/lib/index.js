@@ -70,6 +70,8 @@ export function apply(ctx, config = {}) {
   const children = { bridge: null, minter: null };
   let stopped = false;
   let serveDone = false;
+  let serveBusy = false;
+  let watchBusy = false;
 
   // ---- ports ----------------------------------------------------------
 
@@ -100,6 +102,7 @@ export function apply(ctx, config = {}) {
   // ---- children -------------------------------------------------------
 
   async function spawnBridge() {
+    if (stopped) return;
     try {
       const script = path.join(pkgDir, "bridge", "dsh-phone-proxy.cjs");
       // The bridge discovers the app's web port by itself at startup (cookie
@@ -126,6 +129,7 @@ export function apply(ctx, config = {}) {
   }
 
   async function spawnMinter() {
+    if (stopped) return;
     try {
       const args = ["web", "--host", "127.0.0.1", "--port", String(cfg.cliPort), "--no-open"];
       if (cfg.trustedHost) args.push("--trusted-host", cfg.trustedHost);
@@ -148,6 +152,8 @@ export function apply(ctx, config = {}) {
   }
 
   function publishServe() {
+    if (stopped || serveBusy) return;
+    serveBusy = true;
     const tryBin = (bin) => new Promise((resolve) => {
       execFile(bin, ["serve", "--bg", String(cfg.bridgePort)], { timeout: 8000 }, (err) => resolve(!err));
     });
@@ -160,19 +166,23 @@ export function apply(ctx, config = {}) {
       } else {
         warn("tailscale serve not configured (tailscale CLI not found or serve disabled)");
       }
+      serveBusy = false;
     })();
   }
 
   // ---- watchdog -------------------------------------------------------
 
   async function watch() {
-    if (stopped) return;
+    if (stopped || watchBusy) return;
+    watchBusy = true;
     try {
       if (!alive("bridge") && !(await portBusy(cfg.bridgePort))) await spawnBridge();
       if (cfg.minter && !alive("minter") && !(await portBusy(cfg.cliPort))) await spawnMinter();
       if (cfg.serve && !serveDone && alive("bridge")) publishServe();
     } catch (e) {
       warn(`watch error: ${e && e.message}`);
+    } finally {
+      watchBusy = false;
     }
   }
 

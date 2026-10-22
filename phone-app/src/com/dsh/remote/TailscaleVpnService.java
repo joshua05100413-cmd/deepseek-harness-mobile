@@ -28,6 +28,15 @@ public class TailscaleVpnService extends VpnService implements libtailscale.IPNS
     private final String randomID = UUID.randomUUID().toString();
 
     private android.net.ConnectivityManager.NetworkCallback underlyingCb;
+    private final java.util.LinkedHashSet<android.net.Network> physicalNetworks =
+        new java.util.LinkedHashSet<>();
+
+    private void updateUnderlyingNetworks() {
+        // null delegates selection to Android when no physical network is known.
+        // An empty array explicitly tells Android the VPN has NO connectivity.
+        setUnderlyingNetworks(physicalNetworks.isEmpty() ? null
+            : physicalNetworks.toArray(new android.net.Network[0]));
+    }
 
     @Override
     public void onCreate() {
@@ -43,16 +52,19 @@ public class TailscaleVpnService extends VpnService implements libtailscale.IPNS
                 (android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
             underlyingCb = new android.net.ConnectivityManager.NetworkCallback() {
                 @Override public void onAvailable(android.net.Network n) {
-                    setUnderlyingNetworks(new android.net.Network[]{n});
+                    physicalNetworks.add(n);
+                    updateUnderlyingNetworks();
                 }
 
                 @Override public void onLost(android.net.Network n) {
-                    setUnderlyingNetworks(new android.net.Network[0]);
+                    physicalNetworks.remove(n);
+                    updateUnderlyingNetworks();
                 }
             };
             cm.registerNetworkCallback(
                 new android.net.NetworkRequest.Builder()
                     .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
                     .build(), underlyingCb);
         } catch (Exception ignored) {}
     }
