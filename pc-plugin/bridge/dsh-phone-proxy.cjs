@@ -30,30 +30,37 @@ const CLI_LOG = process.env.DSH_PHONE_CLI_LOG || require('path').join(require('o
 const COOKIE_ATTRS = '; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax';
 let appPort = Number(process.argv[2]) || 4505;
 
-function discoverAppPort() {
-  return new Promise((resolve) => {
+async function discoverAppPort() {
+  const run = () => new Promise((resolve) => {
     execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', DISCOVER], { timeout: 10000 }, async (err, out) => {
       const cands = String(out || '').split(/\s+/).map((x) => parseInt(x, 10)).filter((n) => Number.isFinite(n) && n > 0);
-      if (!cands.length) return resolve(appPort);
+      if (!cands.length) return resolve(null);
       // The app process can host several web roots, each with its own signing
       // secret. Pick the root the minter's cookie actually unlocks: mint one
       // and probe GET / — the wrong root answers 401 even with a valid cookie.
       let pair = null;
       try { pair = await mintCookie(); } catch {}
-      let guessed = !pair ? cands[0] : null;
+      if (!pair) return resolve(null); // minter not ready yet — caller retries
       for (const port of cands) {
         const ok = await new Promise((res) => {
-          const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: '/', headers: { host: AUTHORITY, origin: 'http://' + AUTHORITY, cookie: pair || '' } }, (up) => { up.resume(); res(up.statusCode === 200); });
+          const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: '/', headers: { host: AUTHORITY, origin: 'http://' + AUTHORITY, cookie: pair } }, (up) => { up.resume(); res(up.statusCode === 200); });
           req.on('error', () => res(false));
           req.setTimeout(3000, () => { req.destroy(); res(false); });
           req.end();
         });
-        if (ok) { appPort = port; guessed = null; break; }
+        if (ok) return resolve(port);
       }
-      if (guessed) appPort = guessed; // no mint yet: best guess, retried later
-      resolve(appPort);
+      resolve(null);
     });
   });
+  // Retry for a while: at startup the minter may not have printed its token yet,
+  // and picking a wrong/guessed port sticks until the next failure.
+  for (let i = 0; i < 15; i++) {
+    const p = await run();
+    if (p) { appPort = p; return appPort; }
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  return appPort; // keep previous value; forward() will retry on 401
 }
 
 function readCliToken() {
@@ -138,6 +145,26 @@ function forward(req, res, targetPort, retried) {
   const upstream = http.request(
     { host: '127.0.0.1', port: targetPort, method: req.method, path: req.url, headers: rewriteHeaders(req.headers) },
     (up) => {
+      const headers0 = { ...up.headers };
+      const type0 = String(headers0['content-type'] || '');
+      // A 401 JSON from the wrong web root (another listener of the app) looks
+      // identical to a real auth failure to the phone. Re-discover the right
+      // root once before surfacing it.
+      if (!retried && up.statusCode === 401 && /json/.test(type0)) {
+        const chunks = [];
+        up.on('data', (c) => chunks.push(c));
+        up.on('end', async () => {
+          const body = Buffer.concat(chunks).toString('utf8');
+          if (/Authorization bearer|invalid_api_key|"unauthorized"/i.test(body)) {
+            const p = await discoverAppPort();
+            if (p && p !== targetPort) return forward(req, res, p, true);
+          }
+          const h = { ...headers0, 'cross-origin-resource-policy': 'cross-origin' };
+          res.writeHead(up.statusCode, h);
+          res.end(Buffer.concat(chunks));
+        });
+        return;
+      }
       const headers = rewriteSetCookie({ ...up.headers });
       const type = String(headers['content-type'] || '');
       const compressible = /text\/|javascript|json|xml|svg/.test(type);
