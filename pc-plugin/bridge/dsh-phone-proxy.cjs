@@ -16,7 +16,7 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
-const { pipeline } = require('stream');
+const { pipeline, Transform } = require('stream');
 const { execFile } = require('child_process');
 
 // A proxy must never die: log and keep serving.
@@ -29,7 +29,51 @@ const AUTHORITY = '127.0.0.1:4505'; // stable identity the app trusts (loopback)
 const DISCOVER = path.join(__dirname, 'find-app-port.ps1');
 const CLI_LOG = process.env.DSH_PHONE_CLI_LOG || require('path').join(require('os').homedir(), '.dsh', 'logs', 'dsh-web-serve.log');
 const COOKIE_ATTRS = '; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax';
-let appPort = Number(process.argv[2]) || 4505;
+let appPort = Number(process.argv[2]) || null;
+const { createUploads } = require('./resumable-upload.cjs');
+const uploads = createUploads({ getPort: () => appPort, rewriteHeaders });
+const transportScript = fs.readFileSync(path.join(__dirname, 'transport.js'));
+
+function transportRoute(req, res) {
+  if (req.url.split('?')[0] === '/__dsh/transport.js') {
+    res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(transportScript);
+    return true;
+  }
+  if (/^\/__dsh\/uploads(?:\/|\?|$)/.test(req.url)) {
+    void uploads.handle(req, res);
+    return true;
+  }
+  return false;
+}
+
+function injectTransport() {
+  let prefix = Buffer.alloc(0);
+  let injected = false;
+  const tag = '<script src="/__dsh/transport.js"></script>';
+  return new Transform({
+    transform(chunk, encoding, callback) {
+      if (injected) return callback(null, chunk);
+      prefix = Buffer.concat([prefix, chunk]);
+      // ASCII header matching preserves UTF-8 sequences split across chunks.
+      const match = /<head(?:\s[^>]*)?>/i.exec(prefix.toString('latin1'));
+      if (match) {
+        const offset = match.index + match[0].length;
+        this.push(prefix.subarray(0, offset));
+        this.push(tag);
+        this.push(prefix.subarray(offset));
+      } else if (prefix.length < 65536) return callback();
+      else { this.push(tag); this.push(prefix); }
+      prefix = Buffer.alloc(0);
+      injected = true;
+      callback();
+    },
+    flush(callback) {
+      if (!injected) { this.push(tag); this.push(prefix); }
+      callback();
+    }
+  });
+}
 
 let discoveryPromise = null;
 function discoverAppPort() {
@@ -42,7 +86,7 @@ function discoverAppPort() {
 
 async function scanAppPort() {
   const run = () => new Promise((resolve) => {
-    execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', DISCOVER], { timeout: 10000 }, async (err, out) => {
+    execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', DISCOVER], { timeout: 10000, windowsHide: true }, async (err, out) => {
       const cands = String(out || '').split(/\s+/).map((x) => parseInt(x, 10)).filter((n) => Number.isFinite(n) && n > 0);
       if (!cands.length) return resolve(null);
       // The app process can host several web roots, each with its own signing
@@ -52,6 +96,7 @@ async function scanAppPort() {
       try { pair = await mintCookie(); } catch {}
       if (!pair) return resolve(null); // minter not ready yet — caller retries
       for (const port of cands) {
+        if (port === CLI_PORT || port === LISTEN_PORT) continue;
         const ok = await new Promise((res) => {
           const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: '/', headers: { host: AUTHORITY, origin: 'http://' + AUTHORITY, cookie: pair } }, (up) => { up.resume(); res(up.statusCode === 200); });
           req.on('error', () => res(false));
@@ -65,7 +110,7 @@ async function scanAppPort() {
   });
   // Retry for a while: at startup the minter may not have printed its token yet,
   // and picking a wrong/guessed port sticks until the next failure.
-  for (let i = 0; i < 15; i++) {
+  for (let i = 0; i < 3; i++) {
     const p = await run();
     if (p) { appPort = p; return appPort; }
     await new Promise((r) => setTimeout(r, 1500));
@@ -144,7 +189,7 @@ function rewriteSetCookie(headers) {
 function waitingPage(res, note) {
   if (res.destroyed || res.writableEnded) return;
   if (res.headersSent) { res.destroy(); return; }
-  res.writeHead(503, { 'content-type': 'text/html; charset=utf-8' });
+  res.writeHead(503, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'retry-after': '5' });
   res.end(`<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta http-equiv="refresh" content="5"><title>等待桌面 App</title>
 <style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#111;color:#eee;text-align:center;padding:0 24px}</style>
@@ -155,6 +200,11 @@ function waitingPage(res, note) {
 
 function forward(req, res, targetPort, retried) {
   if (res.destroyed || res.writableEnded) return;
+  if (!targetPort) {
+    if (retried || !['GET', 'HEAD'].includes(req.method)) return waitingPage(res, '正在识别桌面工作台，尚未提交此请求。');
+    discoverAppPort().then(port => forward(req, res, port, true));
+    return;
+  }
   // A consumed request body cannot be replayed. Never retry commands/uploads.
   const canRetry = !retried && (req.method === 'GET' || req.method === 'HEAD')
     && !req.headers['transfer-encoding'] && !Number(req.headers['content-length']);
@@ -197,7 +247,29 @@ function forward(req, res, targetPort, retried) {
       if (/text\/html/.test(type)) {
         headers['cross-origin-opener-policy'] = 'same-origin';
         headers['cross-origin-embedder-policy'] = 'credentialless';
+        headers['cache-control'] = 'no-store';
+        // Install upload transport before any DSH plugin captures Worker.
+        if (req.method !== 'HEAD' && up.statusCode === 200 && ['','gzip','br','deflate'].includes(enc)) {
+          delete headers['content-length'];
+          delete headers['content-encoding'];
+          delete headers.etag;
+          headers['cross-origin-resource-policy'] = 'cross-origin';
+          const streams = [up];
+          if (enc === 'gzip') streams.push(zlib.createGunzip());
+          if (enc === 'br') streams.push(zlib.createBrotliDecompress());
+          if (enc === 'deflate') streams.push(zlib.createInflate());
+          streams.push(injectTransport());
+          if (wantsGzip) {
+            headers['content-encoding'] = 'gzip';
+            headers.vary = headers.vary ? headers.vary + ', Accept-Encoding' : 'Accept-Encoding';
+            streams.push(zlib.createGzip({ flush: zlib.constants.Z_SYNC_FLUSH }));
+          }
+          res.writeHead(up.statusCode, headers);
+          pipeline(...streams, res, () => {});
+          return;
+        }
       }
+      if (/^\/api\//.test(req.url)) headers['cache-control'] = 'no-store';
       headers['cross-origin-resource-policy'] = 'cross-origin';
       // Large uncompressed text/JSON (e.g. image payloads) is slow over the
       // relay until the client aborts. Compress it here - raw bytes only, no
@@ -228,7 +300,9 @@ function forward(req, res, targetPort, retried) {
     }
     waitingPage(res);
   });
-  upstream.setTimeout(30000, () => upstream.destroy(new Error('upstream response timeout')));
+  // This is inactivity, not a total transfer deadline. Slow uploads can last
+  // much longer than 30 seconds; progress and backpressure must keep flowing.
+  upstream.setTimeout(120000, () => upstream.destroy(new Error('upstream response timeout')));
   res.once('close', () => upstream.destroy());
   req.once('aborted', () => upstream.destroy());
   if (retried) upstream.end();
@@ -237,12 +311,16 @@ function forward(req, res, targetPort, retried) {
 
 // The rewritten /__insp path routes to the app's local resource/inspector port.
 function forwardInspector(req, res) {
-  const target = { host: '127.0.0.1', port: 9230, method: req.method, path: req.url.replace(/^\/__insp/, '') || '/', headers: { ...req.headers, host: '127.0.0.1:9230' } };
+  const target = { host: '127.0.0.1', port: 9230, method: req.method, path: req.url.replace(/^\/__insp/, '') || '/', headers: { ...req.headers, host: '127.0.0.1:9230', origin: 'http://127.0.0.1:9230' } };
   const up = http.request(target, (u) => {
     res.writeHead(u.statusCode, u.headers);
+    u.on('error', () => res.destroy());
     u.pipe(res);
   });
   up.on('error', () => waitingPage(res));
+  up.setTimeout(120000, () => up.destroy());
+  res.once('close', () => up.destroy());
+  req.once('aborted', () => up.destroy());
   req.pipe(up);
 }
 
@@ -401,7 +479,7 @@ function proxyUpgrade(req, socket, head, port, pathOverride, hostHeader) {
   const headers = rewriteHeaders(req.headers);
   headers['connection'] = 'Upgrade';
   headers['upgrade'] = req.headers.upgrade || 'websocket';
-  if (hostHeader) headers['host'] = hostHeader;
+  if (hostHeader) { headers['host'] = hostHeader; headers['origin'] = 'http://' + hostHeader; }
   const r = http.request({ host: '127.0.0.1', port, method: req.method, path: pathOverride || req.url, headers });
   let peer = null;
   const close = () => {
@@ -445,17 +523,22 @@ function proxyUpgrade(req, socket, head, port, pathOverride, hostHeader) {
   r.end();
 }
 
-http
-  .createServer((req, res) => {
+const handlePhoneRequest = (req, res) => {
+    if (transportRoute(req, res)) return;
     if (req.url.startsWith('/__insp')) return forwardInspector(req, res);
     if (req.url.startsWith('/__site/')) return serveSite(req, res);
     if (req.url.startsWith('/__local/')) return forwardLocal(req, res);
     const isLogin = req.url.includes('token=');
     const hasCookie = String(req.headers.cookie || '').includes('dsh-auth-');
-    if (!isLogin && !hasCookie) return autoLogin(res);
+    if (!isLogin && !hasCookie) {
+      if (req.method === 'GET' || req.method === 'HEAD') return autoLogin(res);
+      res.writeHead(401, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      return res.end(JSON.stringify({ error: '登录已失效，请重新连接后再发送。' }));
+    }
     forward(req, res, isLogin ? CLI_PORT : appPort, false);
-  })
-  .on('upgrade', (req, socket, head) => {
+  }
+const handlePhoneUpgrade = (req, socket, head) => {
+    if (!appPort && !req.url.startsWith('/__')) { socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n'); return; }
     if (req.url.startsWith('/__insp')) {
       return proxyUpgrade(req, socket, head, 9230, req.url.replace(/^\/__insp/, '') || '/', '127.0.0.1:9230');
     }
@@ -464,7 +547,12 @@ http
       return proxyUpgrade(req, socket, head, parseInt(lm[1], 10), lm[2] || '/', '127.0.0.1:' + lm[1]);
     }
     proxyUpgrade(req, socket, head, appPort, req.url, null);
-  })
+  }
+
+http
+  .createServer(handlePhoneRequest)
+  .on('upgrade', handlePhoneUpgrade)
+  .on('listening', function () { this.requestTimeout = 0; this.keepAliveTimeout = 65000; })
   .listen(LISTEN_PORT, '127.0.0.1', () => {
     console.log(`dsh phone proxy: :${LISTEN_PORT} -> app :${appPort} (authority ${AUTHORITY}, auto-login via cli :${CLI_PORT})`);
   });
@@ -482,20 +570,10 @@ try {
     if (tailIp) break;
   }
   if (tailIp) {
-    const tail = http
-      .createServer((req, res) => {
-        if (req.url.startsWith('/__insp')) return forwardInspector(req, res);
-        if (req.url.startsWith('/__site/')) return serveSite(req, res);
-        if (req.url.startsWith('/__local/')) return forwardLocal(req, res);
-        forward(req, res, appPort, false);
-      })
-      .on('upgrade', (req, socket, head) => {
-        if (req.url.startsWith('/__insp')) return proxyUpgrade(req, socket, head, 9230, req.url.replace(/^\/__insp/, '') || '/', '127.0.0.1:9230');
-        const lm = req.url.match(/^\/__local\/(\d+)(\/.*)?$/);
-        if (lm) return proxyUpgrade(req, socket, head, parseInt(lm[1], 10), lm[2] || '/', '127.0.0.1:' + lm[1]);
-        proxyUpgrade(req, socket, head, appPort, req.url, null);
-      });
+    const tail = http.createServer(handlePhoneRequest).on('upgrade', handlePhoneUpgrade);
     tail.on('error', (e) => console.error('tail listener:', e.message));
+    tail.requestTimeout = 0;
+    tail.keepAliveTimeout = 65000;
     tail.listen(LISTEN_PORT, tailIp, () => {
       console.log(`dsh phone proxy: tailnet listener ${tailIp}:${LISTEN_PORT}`);
     });

@@ -167,7 +167,34 @@ public final class SecureStore implements libtailscale.AppContext {
 
     @Override
     public String getPlatformDNSConfig() {
-        return "";
+        try {
+            ConnectivityManager cm = (ConnectivityManager) ctx.getSystemService(Context.CONNECTIVITY_SERVICE);
+            Network network = physicalNetwork(cm);
+            android.net.LinkProperties lp = network == null ? null : cm.getLinkProperties(network);
+            if (lp == null) return "";
+            StringBuilder dns = new StringBuilder();
+            for (java.net.InetAddress address : lp.getDnsServers()) {
+                if (dns.length() > 0) dns.append(' ');
+                dns.append(address.getHostAddress());
+            }
+            return dns + "\n" + (lp.getDomains() == null ? "" : lp.getDomains());
+        } catch (Exception e) { return ""; }
+    }
+
+    static Network physicalNetwork(ConnectivityManager cm) {
+        Network best = null;
+        int bestScore = -1;
+        Network active = cm.getActiveNetwork();
+        for (Network network : cm.getAllNetworks()) {
+            NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+            if (caps == null || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue;
+            int score = (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) ? 100 : 0)
+                + (network.equals(active) ? 20 : 0)
+                + (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ? 10 : 0);
+            if (score > bestScore) { best = network; bestScore = score; }
+        }
+        return best;
     }
 
     @Override
@@ -175,16 +202,7 @@ public final class SecureStore implements libtailscale.AppContext {
         try {
             ConnectivityManager cm =
                 (ConnectivityManager) ctx.getSystemService(Context.CONNECTIVITY_SERVICE);
-            Network best = null;
-            for (Network n : cm.getAllNetworks()) {
-                NetworkCapabilities caps = cm.getNetworkCapabilities(n);
-                if (caps == null) continue;
-                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue;
-                if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
-                    best = n;
-                    break;
-                }
-            }
+            Network best = physicalNetwork(cm);
             if (best == null) return false;
             FileDescriptor fdObj = new FileDescriptor();
             Field f = FileDescriptor.class.getDeclaredField("descriptor");

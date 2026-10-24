@@ -15,7 +15,8 @@ function bridge() {
   const file = path.join(__dirname, 'bridge/dsh-phone-proxy.cjs');
   const source = fs.readFileSync(file, 'utf8').split('\nhttp\n  .createServer')[0];
   const context = vm.createContext({
-    require, console, Buffer, setTimeout, clearTimeout, __dirname: path.dirname(file),
+    require: require('node:module').createRequire(file), console, Buffer, setTimeout, clearTimeout,
+    setInterval, clearInterval, URL, __dirname: path.dirname(file),
     process: { env: {}, argv: [], on() {} },
   });
   vm.runInContext(source, context);
@@ -81,6 +82,33 @@ test('gzip sends incremental data and preserves JSON content', { timeout: 4000 }
   const rest = body(gunzip);
   upstream.end('42}');
   assert.equal(first.toString() + (await rest).toString(), '{"value":42}');
+});
+
+test('compressed HTML installs transport before DSH boot and is never cached', async t => {
+  const html = '<!doctype html><html><head><meta charset="utf-8"><script src="/boot.js"></script></head><body>测试页面</body></html>';
+  const target = await listen(t, http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html', 'content-encoding': 'gzip', etag: 'old-tag', 'cache-control': 'max-age=3600' });
+    res.end(zlib.gzipSync(html));
+  }));
+  const b = bridge();
+  const proxy = await listen(t, http.createServer((req, res) => b.forward(req, res, target, false)));
+  const res = await request(t, proxy, { headers: { 'accept-encoding': 'gzip' } });
+  const output = zlib.gunzipSync(await body(res)).toString('utf8');
+  assert.equal(output, html.replace('<head>', '<head><script src="/__dsh/transport.js"></script>'));
+  assert.equal(res.headers['cache-control'], 'no-store');
+  assert.equal(res.headers.etag, undefined);
+});
+
+test('API replies override stale upstream caching', async t => {
+  const target = await listen(t, http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'max-age=86400' });
+    res.end('{}');
+  }));
+  const b = bridge();
+  const proxy = await listen(t, http.createServer((req, res) => b.forward(req, res, target, false)));
+  const res = await request(t, proxy, { path: '/api/features' });
+  await body(res);
+  assert.equal(res.headers['cache-control'], 'no-store');
 });
 
 test('canceling a stream releases the upstream connection', { timeout: 4000 }, async (t) => {

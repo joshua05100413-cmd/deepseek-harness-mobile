@@ -7,6 +7,7 @@ const path = require('node:path');
 const {spawn} = require('node:child_process');
 const http = require('node:http');
 const {once} = require('node:events');
+const {createHash} = require('node:crypto');
 
 async function connect(url) {
   const ws = new WebSocket(url);
@@ -68,7 +69,9 @@ test('mobile drawer layout, interaction and injection regressions', {timeout: 30
   let holdProbe = false;
   let heldProbe;
   let probeCount = 0;
+  let uploadHandler;
   const server = http.createServer((req, res) => {
+    if (uploadHandler && req.url.startsWith('/__dsh/uploads')) return uploadHandler(req, res);
     if (req.method === 'HEAD') {
       probeCount++;
       if (holdProbe) { heldProbe = res; return; }
@@ -76,6 +79,16 @@ test('mobile drawer layout, interaction and injection regressions', {timeout: 30
     res.writeHead(backendAvailable ? 200 : 503, { 'content-type': 'text/html' });
     res.end('<!doctype html><body></body>');
   });
+  const streamSockets = new Set();
+  server.on('upgrade', (req, socket) => {
+    if (req.url !== '/api/synthetic-stream') { socket.destroy(); return; }
+    const accept = createHash('sha1').update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + '\r\n\r\n');
+    streamSockets.add(socket);
+    socket.on('error', () => {});
+    socket.on('close', () => streamSockets.delete(socket));
+  });
+  t.after(() => { for (const socket of streamSockets) socket.destroy(); });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   t.after(() => { server.closeAllConnections(); server.close(); });
@@ -152,6 +165,21 @@ test('mobile drawer layout, interaction and injection regressions', {timeout: 30
     await evaluate(script);
     assert.equal(await evaluate("document.querySelectorAll('[data-dsh-mask]').length"), 1);
     assert.equal(await evaluate("document.querySelectorAll('#dsh-mobile-ui').length"), 1);
+  });
+  await t.test('fish skin switches in place without losing editor, file or touch layout', async () => {
+    const result=await evaluate(`(()=>{
+      const editor=document.querySelector('textarea');editor.value='skin synthetic draft';
+      const transfer=new DataTransfer();transfer.items.add(new File(['synthetic'],'skin.txt'));
+      const input=document.querySelector('input[type=file]');input.files=transfer.files;
+      for(let i=0;i<4;i++){window.__dshSetSkin(true);window.__dshSetSkin(false);}
+      window.__dshSetSkin(true);window.__dshSetSkin(true);
+      const active=document.querySelectorAll('#dsh-fish-skin').length;
+      window.__dshSetSkin(false);
+      return {same:editor===document.querySelector('textarea'),draft:editor.value,file:input.files[0].size,
+        active,removed:!document.getElementById('dsh-fish-skin'),width:document.querySelector('main').getBoundingClientRect().width};
+    })()`);
+    assert.equal(result.same,true);assert.equal(result.draft,'skin synthetic draft');assert.equal(result.file,9);
+    assert.equal(result.active,1);assert.equal(result.removed,true);assert.ok(result.width>=380);
   });
   await t.test('disabling auto-hide and resizing cannot blank the conversation', async () => {
     await evaluate('window.__dshSetAutoSidebar(false)');
@@ -270,5 +298,81 @@ test('mobile drawer layout, interaction and injection regressions', {timeout: 30
       const valid=socket instanceof Child&&socket instanceof WebSocket;
       socket.close();return valid;
     })()`), true);
+  });
+  await t.test('downlink heartbeats cannot hide a failed upstream round trip', async () => {
+    await evaluate(`new Promise((resolve,reject)=>{
+      window.syntheticStream=new WebSocket('ws://127.0.0.1:${server.address().port}/api/synthetic-stream');
+      syntheticStream.onopen=()=>resolve(true);syntheticStream.onerror=reject;
+    })`);
+    backendAvailable = false;
+    assert.equal(await tick(), 'bad');
+    for (const socket of streamSockets) socket.write(Buffer.from([0x81, 0x04, 112, 105, 110, 103]));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(await tick(true, false), 'bad');
+    backendAvailable = true;
+    await evaluate('window.testClock+=5000');
+    assert.equal(await tick(), 'ok');
+    await evaluate('syntheticStream.close()');
+  });
+  await t.test('real upload Worker resumes after a lost acknowledgement and preserves DSH receipts', async () => {
+    const pluginRoot = fs.existsSync(path.join(__dirname, '../pc-plugin')) ? '../pc-plugin' : '../dsh-phone-remote';
+    const { createUploads } = require(path.join(__dirname, pluginRoot, 'bridge/resumable-upload.cjs'));
+    let bytes = 0;
+    let submissions = 0;
+    const upstream = http.createServer(async (req, res) => {
+      if (req.method === 'GET') { res.end('authenticated test root'); return; }
+      submissions++;
+      for await (const chunk of req) bytes += chunk.length;
+      res.end(JSON.stringify({ ok: true, value: { receiptId: 'synthetic-receipt',
+        file: { attachmentId: 'synthetic-file', name: 'test.bin', bytes } } }));
+    });
+    upstream.listen(0, '127.0.0.1');
+    await once(upstream, 'listening');
+    t.after(() => { upstream.closeAllConnections(); upstream.close(); });
+    const uploads = createUploads({ getPort: () => upstream.address().port, rewriteHeaders: h => ({ ...h }) });
+    t.after(() => uploads.close());
+    let loseAck = true;
+    let loseCreation = true;
+    const creationIds = [];
+    uploadHandler = (req, res) => {
+      if (req.method === 'POST' && req.url === '/__dsh/uploads') {
+        const end = res.end;
+        res.end = function (body, ...args) {
+          try { creationIds.push(JSON.parse(body).id); } catch (_) {}
+          if (loseCreation) { loseCreation = false; this.destroy(); return this; }
+          return end.call(this, body, ...args);
+        };
+      }
+      if (req.method === 'PUT' && loseAck) {
+        loseAck = false;
+        // Commit bytes, but lose only the reply. The Worker must read the
+        // committed offset instead of appending or submitting twice.
+        res.end = () => res.destroy();
+      }
+      void uploads.handle(req, res);
+    };
+    await evaluate("document.cookie='dsh-auth-test=synthetic; Path=/'");
+    await evaluate(fs.readFileSync(path.join(__dirname, pluginRoot, 'bridge/transport.js'), 'utf8'));
+    const result = await evaluate(`new Promise((resolve,reject)=>{
+      const worker=new Worker(URL.createObjectURL(new Blob(['throw new Error("original worker should be replaced")'])),{name:'dsh-file-upload'});
+      let progress=0;
+      worker.onmessage=({data})=>{
+        if(data.kind==='progress'){progress=data.loaded;return}
+        worker.terminate();
+        if(data.kind==='error')reject(new Error(data.message));
+        else resolve({status:data.status,body:JSON.parse(data.body),progress});
+      };
+      worker.onerror=reject;
+      worker.postMessage({url:location.origin+'/api/session/uploadFileBinary?sessionId=synthetic',
+        body:new Blob([new Uint8Array(3*1024*1024+9)]),headers:{'content-type':'application/octet-stream'}});
+    })`);
+    assert.equal(result.status, 200);
+    assert.equal(result.body.value.receiptId, 'synthetic-receipt');
+    assert.equal(result.progress, 3 * 1024 * 1024 + 9);
+    assert.equal(bytes, result.progress);
+    assert.equal(submissions, 1);
+    assert.ok(creationIds.length >= 2);
+    assert.equal(new Set(creationIds).size, 1);
+    uploadHandler = null;
   });
 });

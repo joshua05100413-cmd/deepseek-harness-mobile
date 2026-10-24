@@ -1,20 +1,58 @@
 (function () {
   'use strict';
+  if (!document.body) return; // Native resource callbacks can precede the DOM.
   if (window.__dshAdapted) {
     window.__dshSetAutoSidebar(window.__dshAutoSidebar);
+    window.__dshSetSkin?.(window.__dshFishSkin === true);
     return;
   }
   window.__dshAdapted = true;
+  window.__dshProbeRoundTripOnly = true;
+
+  window.__dshSetSkin = function(fish) {
+    let skin = document.getElementById('dsh-fish-skin');
+    document.documentElement.toggleAttribute("data-dsh-fish",!!fish);
+    if(!fish) { skin?.remove(); return; }
+    if(skin) return;
+    skin = document.createElement('style'); skin.id='dsh-fish-skin';
+    skin.textContent = `
+      html[data-dsh-fish] ::selection { background:#8ebcff66; }
+      html[data-dsh-fish] textarea:focus-visible, html[data-dsh-fish] [contenteditable=true]:focus-visible { outline:2px solid #6d9fe0; outline-offset:3px; border-radius:12px; }
+      html[data-dsh-fish] [data-dsh-sidebar] { border-inline-end:1px solid #6d9fe055; background-image:linear-gradient(145deg,#6698dc14,#b2d9fc22); }
+      html[data-dsh-fish] nav[aria-label="全局面板"]::before, html[data-dsh-fish] nav[aria-label="Global panel"]::before {
+        content:'大肥鱼的工作台'; display:block; flex-shrink:0; min-height:46px; line-height:46px;
+        padding-inline-start:52px; margin:8px; font-size:13px; font-weight:600; border-radius:16px;
+        background: url('/__dsh/android-skin/mascot.png') 8px center/36px 36px no-repeat,linear-gradient(110deg,#80a9df22,#aacdec11);
+      }
+      html[data-dsh-fish] [class*="_card"]:has([contenteditable=true],textarea) {
+        border:1px solid #7da4d15c; box-shadow:0 4px 20px #3367a419; background-image:linear-gradient(150deg,#acd1ff13,#daeaff06);
+      }
+      html[data-dsh-fish] [class*="_card"]:has([contenteditable=true],textarea)::before {
+        content:'大肥鱼的投喂口'; display:block; pointer-events:none; height:24px; line-height:24px;
+        padding-inline-start:30px; margin-bottom:6px; font-size:11px; letter-spacing:.04em; color:#6b88ad;
+        background:url('/__dsh/android-skin/mascot.png') left center/24px 24px no-repeat;
+      }
+      html[data-dsh-fish] button:active { transform:scale(.97); }
+      html[data-dsh-fish] * { scrollbar-color:#799bc1 transparent; scrollbar-width:thin; }
+    `;
+    document.head.appendChild(skin);
+  };
+  window.__dshSetSkin(window.__dshFishSkin === true);
 
   // Retry reads only; preserve cancellation and never replay messages/uploads.
   const originalFetch = window.fetch;
+  if (!window.__dshReadRetry) {
+  window.__dshReadRetry = true;
   window.fetch = function (input, init) {
     const args = arguments;
     const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
     const safe = method === 'GET' || method === 'HEAD';
     const signal = (init && init.signal) || (input && input.signal);
     const run = n => originalFetch.apply(window, args).then(response => {
-      window.__dshTransportResult?.(input, response.ok);
+      // Validation, unsupported features and user errors are not outages.
+      const reachable = response.ok || (response.status >= 400 && response.status < 500
+        && ![401, 403, 408, 429].includes(response.status));
+      window.__dshTransportResult?.(input, reachable);
       return response;
     }).catch(error => {
       if (error.name !== 'AbortError' && !(signal && signal.aborted)) {
@@ -29,6 +67,7 @@
     });
     return run(2);
   };
+  }
 
   const viewport = document.querySelector('meta[name="viewport"]');
   if (viewport) viewport.content = 'width=device-width, initial-scale=1, viewport-fit=cover';
@@ -359,8 +398,10 @@
           latestSocket = socket;
           socket.addEventListener('message', () => {
             if (latestSocket !== socket) return;
-            lastApiSuccessAt = now();
-            reachable = true;
+            // A one-way outage can still deliver queued server heartbeats.
+            // Those messages cannot disprove a failed HTTP round trip, or
+            // suppress the timeout of a probe that is still waiting.
+            if (reachable !== true) { nextProbeAt = 0; return; }
             if (!connectionRetryButton()) recovered();
           });
           socket.addEventListener('close', () => {
@@ -376,6 +417,9 @@
     else nextProbeAt = 0;
   });
   window.__dshConnectionState = function (autoReconnect = true) {
+    // A 200 HTML bootstrap is not proof that its JavaScript/plugins mounted.
+    if (!document.querySelector(navSelector)
+        && !document.querySelector('textarea,[contenteditable="true"]')) return 'loading';
     allowRecovery = autoReconnect;
     const retry = connectionRetryButton();
     if (retry) needsRecovery = true;

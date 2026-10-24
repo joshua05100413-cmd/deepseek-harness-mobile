@@ -26,6 +26,9 @@ public class TailscaleVpnService extends VpnService implements libtailscale.IPNS
     private static final String CHANNEL = "dsh_tunnel";
 
     private final String randomID = UUID.randomUUID().toString();
+    private static final java.util.concurrent.ExecutorService commands =
+        java.util.concurrent.Executors.newSingleThreadExecutor();
+    private volatile boolean stopped;
 
     private android.net.ConnectivityManager.NetworkCallback underlyingCb;
     private final java.util.LinkedHashSet<android.net.Network> physicalNetworks =
@@ -34,8 +37,11 @@ public class TailscaleVpnService extends VpnService implements libtailscale.IPNS
     private void updateUnderlyingNetworks() {
         // null delegates selection to Android when no physical network is known.
         // An empty array explicitly tells Android the VPN has NO connectivity.
-        setUnderlyingNetworks(physicalNetworks.isEmpty() ? null
-            : physicalNetworks.toArray(new android.net.Network[0]));
+        android.net.ConnectivityManager cm = (android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+        android.net.Network preferred = SecureStore.physicalNetwork(cm);
+        setUnderlyingNetworks(preferred == null ? null : new android.net.Network[]{preferred});
+        android.net.LinkProperties lp = preferred == null ? null : cm.getLinkProperties(preferred);
+        libtailscale.Libtailscale.onDNSConfigChanged(lp == null ? "" : lp.getInterfaceName());
     }
 
     @Override
@@ -60,6 +66,14 @@ public class TailscaleVpnService extends VpnService implements libtailscale.IPNS
                     physicalNetworks.remove(n);
                     updateUnderlyingNetworks();
                 }
+
+                @Override public void onCapabilitiesChanged(android.net.Network n, android.net.NetworkCapabilities c) {
+                    updateUnderlyingNetworks();
+                }
+
+                @Override public void onLinkPropertiesChanged(android.net.Network n, android.net.LinkProperties p) {
+                    updateUnderlyingNetworks();
+                }
             };
             cm.registerNetworkCallback(
                 new android.net.NetworkRequest.Builder()
@@ -73,7 +87,8 @@ public class TailscaleVpnService extends VpnService implements libtailscale.IPNS
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent != null ? intent.getAction() : null;
         if (ACTION_STOP.equals(action)) {
-            Tunnel.get(this).setWantRunning(false);
+            stopped = true;
+            commands.execute(() -> Tunnel.get(this).setWantRunning(false));
             close();
             stopSelf();
             return START_NOT_STICKY;
@@ -86,8 +101,12 @@ public class TailscaleVpnService extends VpnService implements libtailscale.IPNS
             return START_NOT_STICKY;
         }
         showNotification();
-        Tunnel.get(this).setWantRunning(true);
-        libtailscale.Libtailscale.requestVPN(this);
+        stopped = false;
+        commands.execute(() -> {
+            if (stopped) return;
+            Tunnel.get(this).setWantRunning(true);
+            if (!stopped) libtailscale.Libtailscale.requestVPN(this);
+        });
         return START_STICKY;
     }
 
@@ -105,12 +124,23 @@ public class TailscaleVpnService extends VpnService implements libtailscale.IPNS
 
     @Override
     public libtailscale.VPNServiceBuilder newBuilder() {
-        return new TsBuilder(new Builder()
+        Diagnostics.event(this,8,1,0);
+        Builder builder = new Builder()
             .setConfigureIntent(PendingIntent.getActivity(this, 0,
                 new Intent(this, MainActivity.class),
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE))
             .allowFamily(OsConstants.AF_INET)
-            .allowFamily(OsConstants.AF_INET6));
+            .allowFamily(OsConstants.AF_INET6)
+            .addDnsServer("100.100.100.100")
+            .addRoute("100.100.100.100", 32);
+        try {
+            // Fail closed if the package cannot be selected: never establish
+            // an unrestricted VPN that changes other applications' routing.
+            builder.addAllowedApplication(getPackageName());
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            throw new IllegalStateException("DSHgo VPN application not found", e);
+        }
+        return new TsBuilder(builder);
     }
 
     @Override
@@ -134,13 +164,22 @@ public class TailscaleVpnService extends VpnService implements libtailscale.IPNS
 
     @Override
     public void onDestroy() {
+        stopped = true;
+        if (underlyingCb != null) {
+            try {
+                ((android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE))
+                    .unregisterNetworkCallback(underlyingCb);
+            } catch (Exception ignored) {}
+            underlyingCb = null;
+        }
         close();
         super.onDestroy();
     }
 
     @Override
     public void onRevoke() {
-        Tunnel.get(this).setWantRunning(false);
+        stopped = true;
+        commands.execute(() -> Tunnel.get(this).setWantRunning(false));
         close();
         stopSelf();
         super.onRevoke();
@@ -164,8 +203,8 @@ public class TailscaleVpnService extends VpnService implements libtailscale.IPNS
             ? new Notification.Builder(this, CHANNEL)
             : new Notification.Builder(this);
         b.setSmallIcon(android.R.drawable.sym_action_chat)
-            .setContentTitle("DSH 隧道运行中")
-            .setContentText("加密链路已建立，远程桌面可用")
+            .setContentTitle("DSHgo 专用隧道运行中")
+            .setContentText("仅 DSHgo 使用隧道，连接状态请查看主界面")
             .setContentIntent(pi)
             .setOngoing(true);
         try {

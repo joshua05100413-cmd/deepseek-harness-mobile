@@ -181,7 +181,8 @@ public final class Tunnel {
     public void setWantRunning(boolean want) {
         try {
             call("PATCH", "prefs",
-                "{\"WantRunningSet\":true,\"WantRunning\":" + want + "}");
+                "{\"WantRunningSet\":true,\"WantRunning\":" + want
+                + ",\"CorpDNSSet\":true,\"CorpDNS\":true}");
         } catch (Exception e) {
             Log.w(TAG, "setWantRunning: " + e.getMessage());
         }

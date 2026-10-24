@@ -93,17 +93,27 @@ public final class LocalForwarder {
             // Connect through Tailscale Serve on 443 (TLS+SNI): it bypasses the
             // PC's firewall (which blocks raw listeners) and needs no open ports.
             javax.net.ssl.SSLSocketFactory f = (javax.net.ssl.SSLSocketFactory) javax.net.ssl.SSLSocketFactory.getDefault();
-            javax.net.ssl.SSLSocket ssl = (javax.net.ssl.SSLSocket) f.createSocket();
+            Socket transport = new Socket();
+            upstream = transport;
+            synchronized (LocalForwarder.class) {
+                if (!sockets.contains(client)) { closeQuietly(transport); return; }
+                sockets.add(transport);
+            }
+            transport.connect(new java.net.InetSocketAddress(ip, 443), 20000);
+            // Preserve the DNS peer identity even when connecting to a resolved
+            // tailnet IP: both SNI and HTTPS endpoint verification need it.
+            javax.net.ssl.SSLSocket ssl = (javax.net.ssl.SSLSocket) f.createSocket(transport, targetHost, 443, true);
             upstream = ssl;
             synchronized (LocalForwarder.class) {
+                sockets.remove(transport);
                 if (!sockets.contains(client)) { closeQuietly(ssl); return; }
                 sockets.add(ssl);
             }
             javax.net.ssl.SSLParameters sp = new javax.net.ssl.SSLParameters();
+            sp.setEndpointIdentificationAlgorithm("HTTPS");
             sp.setServerNames(java.util.Collections.singletonList(new javax.net.ssl.SNIHostName(targetHost)));
             ssl.setSSLParameters(sp);
             ssl.setSoTimeout(15000);
-            ssl.connect(new java.net.InetSocketAddress(ip, 443), 6000);
             ssl.setTcpNoDelay(true);
             ssl.setKeepAlive(true);
             ssl.startHandshake();

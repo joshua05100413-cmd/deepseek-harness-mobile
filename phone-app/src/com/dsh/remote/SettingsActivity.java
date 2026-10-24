@@ -91,7 +91,7 @@ public class SettingsActivity extends Activity {
         tapRow(content, "目标服务器", targetSummary(), new View.OnClickListener() {
             @Override public void onClick(View v) { pickTarget(); }
         });
-        switchRow(content, "自动发现目标", "隧道接通后自动识别远程工作台（万能抓取）",
+        switchRow(content, "自动发现目标", "隧道接通后自动识别远程工作台",
             Prefs.get(this, Prefs.AUTO_DISCOVER, true), Prefs.AUTO_DISCOVER);
         tapRow(content, "重新发现目标", "清除已发现的地址并重新扫描", new View.OnClickListener() {
             @Override public void onClick(View v) { rediscover(); }
@@ -115,6 +115,12 @@ public class SettingsActivity extends Activity {
         tapRow(content, "主题风格", themeSummary(), new View.OnClickListener() {
             @Override public void onClick(View v) { pickTheme(); }
         });
+        if("fish".equals(tp.id)) {
+            LinearLayout preview=rowBase();preview.setOrientation(LinearLayout.VERTICAL);preview.setGravity(Gravity.CENTER);
+            ImageView art=new ImageView(this);art.setImageResource(R.drawable.fish_happy);art.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            preview.addView(art,new LinearLayout.LayoutParams(dp(160),dp(160)));
+            TextView caption=new TextView(this);caption.setText("大肥鱼陪你远程办公 · 可随时切回原主题");caption.setTextColor(DIM);caption.setTextSize(12);preview.addView(caption);content.addView(preview);
+        }
         tapRow(content, "网页缩放", Prefs.fontPct(this) + "%",
             new View.OnClickListener() {
                 @Override public void onClick(View v) { pickFontScale(); }
@@ -137,7 +143,7 @@ public class SettingsActivity extends Activity {
             Prefs.get(this, Prefs.BACK_SUSPEND, true), Prefs.BACK_SUSPEND);
         switchRow(content, "外部链接用系统浏览器", "App 内只打开本服务器的页面",
             Prefs.get(this, Prefs.EXT_LINKS, true), Prefs.EXT_LINKS);
-        switchRow(content, "断线自动重连", "网络恢复后自动重新载入",
+        switchRow(content, "断线自动重连", "恢复连接，尽量保留当前页面和未发送草稿",
             Prefs.get(this, Prefs.AUTO_RECONNECT, true), Prefs.AUTO_RECONNECT);
 
         // ================= 数据 =================
@@ -149,15 +155,34 @@ public class SettingsActivity extends Activity {
             @Override public void onClick(View v) { confirmClear(true); }
         });
 
+        section(content,"故障排查");
+        switchRow(content,"本地诊断日志","免 root · 仅状态和错误码 · 循环保存，不记录聊天或连接地址",Prefs.get(this,Diagnostics.ENABLED,true),Diagnostics.ENABLED);
+        tapRow(content,"导出诊断包","5G 连不上或上传失败后导出 ZIP，手动选择保存位置",v->{
+            Intent save=new Intent(Intent.ACTION_CREATE_DOCUMENT);save.setType("application/zip");save.addCategory(Intent.CATEGORY_OPENABLE);
+            save.putExtra(Intent.EXTRA_TITLE,"DSHgo-diagnostics-"+new java.text.SimpleDateFormat("yyyyMMdd-HHmmss",java.util.Locale.ROOT).format(new java.util.Date())+".zip");
+            try{startActivityForResult(save,2201);}catch(Exception e){Toast.makeText(this,"未找到文件保存应用",Toast.LENGTH_LONG).show();}
+        });
+        tapRow(content,"清除诊断日志","只清除本应用的状态日志",v->{Diagnostics.clear(this);Toast.makeText(this,"诊断日志已清除",Toast.LENGTH_SHORT).show();});
         // ================= 关于 =================
         section(content, "关于");
         content.addView(aboutCard());
+        tapRow(content,"大肥鱼素材与许可","原作：上善无形 · 二次设计：ZipZipPipe · CC BY-NC-SA 4.0",v->
+            dialog("素材署名与许可",null).setMessage("素材来自 fisharchive.cc。原作上善无形，DeepSeek 元素二次设计 ZipZipPipe；图片采用 CC BY-NC-SA 4.0，保留署名、非商业使用、相同方式共享。图片许可独立于 MIT 代码许可。").setPositiveButton("知道了",null).show());
 
         scroll.addView(content);
         root.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         setContentView(root);
     }
 
+    @Override protected void onActivityResult(int request,int result,Intent data){
+        super.onActivityResult(request,result,data);
+        if(request!=2201||result!=RESULT_OK||data==null||data.getData()==null)return;
+        final Uri uri=data.getData();
+        new Thread(()->{boolean success=false;
+            try(java.io.OutputStream out=getContentResolver().openOutputStream(uri,"w")){if(out==null)throw new java.io.IOException();Diagnostics.export(this,out);success=true;}catch(Exception ignored){}
+            final boolean ok=success;handler.post(()->Toast.makeText(this,ok?"诊断包已保存，可手动分享给开发者":"保存失败，请重新选择位置",Toast.LENGTH_LONG).show());
+        },"dsh-diagnostic-export").start();
+    }
     // ---------------------------------------------------------------- rows
 
     private void section(LinearLayout parent, String name) {
@@ -226,6 +251,8 @@ public class SettingsActivity extends Activity {
         final Switch sw = new Switch(this);
         sw.setChecked(checked);
         sw.setShowText(false);
+        sw.setContentDescription(title);
+        row.setOnClickListener(v->sw.setChecked(!sw.isChecked()));
         sw.setOnCheckedChangeListener((btn, on) -> Prefs.get(this).edit().putBoolean(key, on).apply());
         row.addView(sw);
         parent.addView(row);
@@ -255,7 +282,7 @@ public class SettingsActivity extends Activity {
         row.addView(brand);
 
         TextView ver = new TextView(this);
-        ver.setText("DSHgo  v1.1");
+        ver.setText("DSHgo  v1.2");
         ver.setTextColor(DIM);
         ver.setTextSize(12.5f);
         ver.setPadding(0, dp(12), 0, 0);
@@ -367,20 +394,37 @@ public class SettingsActivity extends Activity {
 
     private void diagnose() {
         toast("正在诊断…");
-        final String target = Prefs.serverUrl(this);
+        final String target = Prefs.effectiveUrl(this);
         new Thread(new Runnable() {
             @Override public void run() {
                 final boolean vpn = isVpnUp();
                 long t0 = System.currentTimeMillis();
                 boolean up = false;
+                String detail = "尚未发现目标，请先自动发现或填写服务器地址";
+                HttpURLConnection c = null;
                 try {
-                    HttpURLConnection c = (HttpURLConnection) new URL(target).openConnection();
-                    c.setConnectTimeout(5000);
-                    c.setReadTimeout(5000);
-                    c.getResponseCode();
-                    c.disconnect();
-                    up = true;
-                } catch (Exception ignored) {}
+                    java.net.URL url = new URL(target);
+                    java.net.InetAddress.getAllByName(url.getHost());
+                    detail = "DNS 已解析，正在检查 HTTPS / 桥接";
+                    c = (HttpURLConnection) url.openConnection();
+                    c.setConnectTimeout(15000);
+                    c.setReadTimeout(15000);
+                    c.setInstanceFollowRedirects(false);
+                    int code = c.getResponseCode();
+                    Diagnostics.event(SettingsActivity.this,11,code,System.currentTimeMillis()-t0);
+                    up = code >= 200 && code < 400;
+                    detail = "DNS 解析成功；HTTP " + code + (code >= 500 ? "（电脑桥接或工作台未就绪）" : "");
+                } catch (java.net.UnknownHostException e) {
+                    Diagnostics.event(SettingsActivity.this,11,-2,System.currentTimeMillis()-t0);
+                    detail = "DNS 解析失败：请重新连接 DSHgo 隧道，确认 MagicDNS 已启用";
+                } catch (javax.net.ssl.SSLException e) {
+                    Diagnostics.event(SettingsActivity.this,11,-11,System.currentTimeMillis()-t0);
+                    detail = "TLS 校验或握手失败：请使用电脑的完整 .ts.net 域名，勿替换为 IP";
+                } catch (Exception e) {
+                    Diagnostics.event(SettingsActivity.this,11,-1,System.currentTimeMillis()-t0);
+                    if (!target.isEmpty()) detail = "连接失败：" + e.getClass().getSimpleName();
+                } finally { if (c != null) c.disconnect(); }
+                final String diagnostic = detail;
                 final long ms = System.currentTimeMillis() - t0;
                 final boolean reachable = up;
                 final String ts = tailscaleSummary();
@@ -390,7 +434,8 @@ public class SettingsActivity extends Activity {
                             "Tailscale：" + ts + "\n" +
                             "加密隧道：" + (vpn ? "已连接" : "未连接") + "\n" +
                             "服务器：" + target + "\n" +
-                            "目标可达：" + (reachable ? "是（" + ms + " ms）" : "否") + "\n\n" +
+                            "目标可达：" + (reachable ? "是（" + ms + " ms）" : "否") + "\n" +
+                            diagnostic + "\n\n" +
                             (reachable ? "一切就绪，返回即可使用。"
                                        : "不可达时请检查：① 电脑是否开机并双击了「手机远程启动.bat」② 手机 Tailscale 是否已连接。");
                         dialog("连接诊断", textBlock(body))
@@ -650,7 +695,8 @@ public class SettingsActivity extends Activity {
         android.net.Network n = cm.getActiveNetwork();
         if (n == null) return false;
         android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(n);
-        return caps != null && caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN);
+        return caps != null && caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
+            && (android.os.Build.VERSION.SDK_INT < 29 || caps.getOwnerUid() == android.os.Process.myUid());
     }
 
     private void showHelp() {

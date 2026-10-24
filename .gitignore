@@ -1,0 +1,6 @@
+phone-app/build/
+phone-app/gen/
+phone-app/build-env.bat
+phone-app/toolchain/
+phone-app/third_party/
+*.keystore

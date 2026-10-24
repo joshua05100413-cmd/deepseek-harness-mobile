@@ -68,7 +68,9 @@ public class MainActivity extends Activity {
 
     private WebView web;
     private FrameLayout stack;
-    private LinearLayout overlay, mainRoot;
+    private LinearLayout overlay, mainRoot, toolbar;
+    private ImageView stateArt, statusFish;
+    private LinearLayout connectionBadge;
     private FrameLayout loginLayer;
     private WebView loginWeb;
     private TextView statusTitle, statusSub, subtitleView;
@@ -127,6 +129,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Diagnostics.event(this,1,0,0);
         ThemePalette tp = ThemePalette.get(this);
         BG = tp.bg;
         BAR = tp.bar;
@@ -184,16 +187,16 @@ public class MainActivity extends Activity {
         try {
             if (bootView == null || !(bootView.getParent() instanceof ViewGroup)) return;
             if (bootDismissQueued) return;
-            // Show the logo briefly, then reveal a ready page immediately.
+            // Preserve the requested slow right-to-left author animation.
             long elapsed = System.currentTimeMillis() - bootStartMs;
-            if (elapsed < 700) {
+            if (elapsed < 4700) {
                 bootDismissQueued = true;
                 handler.postDelayed(new Runnable() {
                     @Override public void run() {
                         bootDismissQueued = false;
                         if (!destroyed) removeBoot();
                     }
-                }, 700 - elapsed);
+                }, 4700 - elapsed);
                 return;
             }
             bootDismissQueued = true;
@@ -215,6 +218,7 @@ public class MainActivity extends Activity {
         mainRoot.setFitsSystemWindows(true);
 
         LinearLayout bar = new LinearLayout(this);
+        toolbar=bar;
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setBackgroundColor(BAR);
         bar.setGravity(Gravity.CENTER_VERTICAL);
@@ -251,7 +255,13 @@ public class MainActivity extends Activity {
         subtitleView.setText("启动中…");
         subtitleView.setTextColor(DIM);
         subtitleView.setTextSize(11);
-        titles.addView(subtitleView);
+        connectionBadge=new LinearLayout(this);connectionBadge.setGravity(Gravity.CENTER_VERTICAL);
+        statusFish=new ImageView(this);statusFish.setImageResource(R.drawable.ic_launcher);
+        statusFish.setScaleType(ImageView.ScaleType.FIT_CENTER);statusFish.setContentDescription("大肥鱼连接状态");
+        connectionBadge.addView(statusFish,new LinearLayout.LayoutParams(dp(24),dp(24)));
+        subtitleView.setMaxLines(1);subtitleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        connectionBadge.addView(subtitleView,new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1));
+        titles.addView(connectionBadge);
         bar.addView(titles, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
         dot = new View(this);
@@ -266,7 +276,9 @@ public class MainActivity extends Activity {
 
         bar.addView(iconButton(R.drawable.ic_refresh, new View.OnClickListener() {
             @Override public void onClick(View v) {
-                if (web != null && pageEverLoaded) web.reload();
+                if (web != null && pageEverLoaded) new AlertDialog.Builder(MainActivity.this)
+                    .setTitle("重新载入工作台？").setMessage("重新载入可能清除未发送草稿，并中断上传。网络恢复通常无需刷新。")
+                    .setNegativeButton("保留页面",null).setPositiveButton("重新载入",(d,w)->web.reload()).show();
                 else requestReconnect();
             }
         }));
@@ -280,7 +292,8 @@ public class MainActivity extends Activity {
             }
         }));
 
-        mainRoot.addView(bar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
+        mainRoot.addView(bar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(60)));
+        applyFishChrome();
 
         topBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         topBar.setMax(100);
@@ -297,8 +310,12 @@ public class MainActivity extends Activity {
         overlay.setPadding(dp(16), dp(16), dp(16), dp(16));
 
         ImageView logo = new ImageView(this);
+        stateArt=logo;
+        logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        logo.setContentDescription("DSHgo 状态插画");
         logo.setImageResource(R.drawable.ic_launcher);
         overlay.addView(logo, new LinearLayout.LayoutParams(dp(92), dp(92)));
+        updateStateArt();
 
         statusTitle = new TextView(this);
         statusTitle.setTextColor(TEXT);
@@ -375,7 +392,7 @@ public class MainActivity extends Activity {
         // theme-aware glyph tint: fixed light vectors vanish on light themes
         iv.setColorFilter(TEXT, android.graphics.PorterDuff.Mode.SRC_IN);
         iv.setPadding(dp(8), dp(10), dp(8), dp(10));
-        iv.setLayoutParams(new LinearLayout.LayoutParams(dp(40), dp(44)));
+        iv.setLayoutParams(new LinearLayout.LayoutParams(dp(44), dp(44)));
         if (res == R.drawable.ic_refresh) iv.setContentDescription("刷新");
         if (res == R.drawable.ic_settings) iv.setContentDescription("设置");
         if (res == R.drawable.ic_globe) iv.setContentDescription("站点小窗");
@@ -808,7 +825,8 @@ public class MainActivity extends Activity {
             android.net.Network[] nets = cm.getAllNetworks();
             for (android.net.Network n : nets) {
                 android.net.NetworkCapabilities nc = cm.getNetworkCapabilities(n);
-                if (nc != null && nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) {
+                if (nc != null && nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
+                    && (Build.VERSION.SDK_INT < 29 || nc.getOwnerUid() == android.os.Process.myUid())) {
                     return true;
                 }
             }
@@ -819,10 +837,15 @@ public class MainActivity extends Activity {
     // ---------------------------------------------------------------- web
 
     private void setupWeb(final WebView wv, final boolean isLogin) {
+        if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            WebView.setWebContentsDebuggingEnabled(true);
+        }
         WebSettings s = wv.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
         s.setDatabaseEnabled(true);
+        // Never reuse an old workbench bootstrap or API response while offline.
+        if (!isLogin) s.setCacheMode(WebSettings.LOAD_NO_CACHE);
         s.setUseWideViewPort(true);
         s.setLoadWithOverviewMode(true);
         s.setSupportZoom(true);
@@ -838,6 +861,9 @@ public class MainActivity extends Activity {
         applyWebPrefs(wv);
 
         wv.setBackgroundColor(BG);
+        if(!isLogin) wv.addJavascriptInterface(new Object(){
+            @android.webkit.JavascriptInterface public void signal(int kind,long bytes,int reason){Diagnostics.signal(getApplicationContext(),kind,bytes,reason);}
+        },"DSHDiagnostics");
         wv.setLongClickable(false);
 
         wv.setWebViewClient(new WebViewClient() {
@@ -853,6 +879,16 @@ public class MainActivity extends Activity {
                 loadStart = System.currentTimeMillis();
             }
 
+            @Override
+            public android.webkit.WebResourceResponse shouldInterceptRequest(WebView view,WebResourceRequest request){
+                Uri uri=request.getUrl();
+                if(!isLogin && "dsh".equals(appMode) && uri.getPath()!=null && uri.getPath().startsWith("/__dsh/android-skin/")
+                    && uri.getAuthority()!=null && uri.getAuthority().equals(Uri.parse(currentUrl).getAuthority())){
+                    String name=uri.getLastPathSegment();int res="mascot.png".equals(name)?R.drawable.ic_launcher:"happy.webp".equals(name)?R.drawable.fish_happy:"error.webp".equals(name)?R.drawable.fish_error:0;
+                    if(res!=0)return new android.webkit.WebResourceResponse(name.endsWith("png")?"image/png":"image/webp",null,getResources().openRawResource(res));
+                }
+                return null;
+            }
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
                 if (isLogin) return false; // login flows anywhere
@@ -876,24 +912,45 @@ public class MainActivity extends Activity {
             }
 
             @Override
+            public void onPageCommitVisible(WebView view, String url) {
+                if (!isLogin && !destroyed) injectAdaptation();
+            }
+
+            @Override
+            public void onLoadResource(WebView view, String url) {
+                if (!isLogin && !destroyed && !pageLoadFailed) injectAdaptation();
+            }
+
+            @Override
             public void onPageFinished(WebView view, String url) {
                 if (isLogin || destroyed) return;
-                pageLoading = false;
-                if (pageLoadFailed) {
-                    // error pages also fire onPageFinished — never call that "ready"
-                    setState(ST_ERROR);
-                    return;
-                }
-                pageEverLoaded = true;
-                reconnectAttempts = 0;
-                reconnectAt = 0;
-                setState(ST_READY);
-                injectAdaptation();
+                final int generation = pageGeneration;
+                view.evaluateJavascript("document.documentURI.indexOf('chrome-error:')===0",
+                    new android.webkit.ValueCallback<String>() {
+                        @Override public void onReceiveValue(String errorDocument) {
+                            if (destroyed || generation != pageGeneration) return;
+                            pageLoading = false;
+                            // Chromium can start its internal error document
+                            // after onReceivedError, resetting the old flag.
+                            if (pageLoadFailed || "true".equals(errorDocument)) {
+                                pageLoadFailed = true;
+                                pageEverLoaded = false;
+                                setState(ST_ERROR);
+                                return;
+                            }
+                            pageEverLoaded = true;
+                            reconnectAttempts = 0;
+                            reconnectAt = 0;
+                            setState(ST_READY);
+                            injectAdaptation();
+                        }
+                    });
             }
 
             @Override
             public void onReceivedError(WebView view, WebResourceRequest req, android.webkit.WebResourceError err) {
                 if (!isLogin && !destroyed && req.isForMainFrame()) {
+                    Diagnostics.event(MainActivity.this,4,err.getErrorCode(),0);
                     pageLoadFailed = true;
                     pageEverLoaded = false;
                     pageLoading = false;
@@ -914,6 +971,7 @@ public class MainActivity extends Activity {
 
             @Override
             public void onReceivedSslError(WebView view, SslErrorHandler handler, android.net.http.SslError error) {
+                Diagnostics.event(MainActivity.this,5,error.getPrimaryError(),0);
                 handler.cancel();
             }
         });
@@ -927,7 +985,7 @@ public class MainActivity extends Activity {
 
             @Override
             public boolean onConsoleMessage(android.webkit.ConsoleMessage cm) {
-                android.util.Log.i("DSHWeb", cm.messageLevel() + " " + cm.message() + " @" + cm.lineNumber());
+                if(cm.messageLevel()==android.webkit.ConsoleMessage.MessageLevel.ERROR) Diagnostics.event(MainActivity.this,10,1,0);
                 return true;
             }
 
@@ -1030,6 +1088,7 @@ public class MainActivity extends Activity {
         } else {
             getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
         }
+        ThemePalette.applySystemBars(getWindow(),BG,BAR);
     }
 
     private void nativeDialog(String message, final JsResult confirm, final JsResult alertOnly) {
@@ -1047,8 +1106,13 @@ public class MainActivity extends Activity {
         b.show();
     }
 
+    private long lastAdaptationAt;
+
     private void injectAdaptation() {
         if ("zcode".equals(appMode)) return;
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - lastAdaptationAt < 250) return;
+        lastAdaptationAt = now;
         try {
             if (mobileUiScript == null) {
                 try (InputStream in = getResources().openRawResource(R.raw.mobile_ui);
@@ -1060,7 +1124,7 @@ public class MainActivity extends Activity {
                 }
             }
             web.evaluateJavascript("window.__dshAutoSidebar="
-                + Prefs.get(this, Prefs.AUTO_SIDEBAR, true) + ";" + mobileUiScript, null);
+                + Prefs.get(this, Prefs.AUTO_SIDEBAR, true) + ";window.__dshFishSkin="+"fish".equals(appliedTheme)+";" + mobileUiScript, null);
         } catch (Exception e) {
             android.util.Log.w("DSHWeb", "mobile UI setup failed", e);
         }
@@ -1265,8 +1329,15 @@ public class MainActivity extends Activity {
                     connectionCheckBusy = false;
                     if (subtitleView == null || destroyed || !resumed) return;
                     String s = String.valueOf(v).replace("\"", "").trim();
+                    if ("loading".equals(s) && System.currentTimeMillis() - loadStart > 180000) {
+                        pageLoadFailed = true;
+                        pageEverLoaded = false;
+                        pageLoading = false;
+                        setState(ST_ERROR);
+                        return;
+                    }
                     if (!s.equals(lastConnectionState)) {
-                        android.util.Log.i("DSHConnection", "state=" + s);
+                        Diagnostics.event(MainActivity.this,3,"ok".equals(s)?1:"bad".equals(s)?2:"reconnecting".equals(s)?3:"loading".equals(s)?4:5,0);
                         lastConnectionState = s;
                     }
                     state = ST_READY;
@@ -1300,7 +1371,7 @@ public class MainActivity extends Activity {
         if (pageLoading) {
             // watchdog: a load stuck too long gets restarted (slow relays, drops),
             // but never while the user is actively typing
-            if (System.currentTimeMillis() - loadStart > 45000) {
+            if (!pageEverLoaded && System.currentTimeMillis() - loadStart > 180000) {
                 web.stopLoading();
                 pageLoading = false;
                 pageLoadFailed = true;
@@ -1354,7 +1425,9 @@ public class MainActivity extends Activity {
 
     private void setState(int st) {
         boolean newError = st == ST_ERROR && state != ST_ERROR;
+        if(state!=st) Diagnostics.event(this,2,st,0);
         state = st;
+        updateStateArt();
         if (bootView != null) {
             bootView.setStatus(st == ST_NEED_LOGIN ? "请登录 Tailscale 账号"
                 : st == ST_NEED_VPN ? "正在开启加密隧道…"
@@ -1406,6 +1479,43 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void applyFishChrome(){
+        if(statusFish==null)return;
+        boolean fish="fish".equals(appliedTheme);
+        statusFish.setVisibility(fish?View.VISIBLE:View.GONE);
+        connectionBadge.setPadding(dp(fish?3:0),0,dp(5),0);
+        if(fish){GradientDrawable badge=new GradientDrawable();badge.setColor(0xFFE5F0FF);badge.setCornerRadius(dp(12));connectionBadge.setBackground(badge);}
+        else connectionBadge.setBackground(null);
+        if(toolbar!=null){GradientDrawable surface=new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,fish?new int[]{0xFFF0F7FF,0xFFE1EDFF}:new int[]{BAR,BAR});toolbar.setBackground(surface);}
+    }
+    private void updateStateArt(){
+        if(stateArt==null)return;
+        boolean fish="fish".equals(appliedTheme);
+        stateArt.setImageResource(fish?(state==ST_ERROR?R.drawable.fish_error:state==ST_NEED_LOGIN?R.drawable.fish_happy:R.drawable.fish_work):R.drawable.ic_launcher);
+        stateArt.setLayoutParams(new LinearLayout.LayoutParams(dp(fish?184:92),dp(fish?184:92)));
+    }
+    /** Recolor in place: preserve the WebView, draft and upload workers. */
+    private void applyLiveTheme(){
+        int oldText=TEXT,oldDim=DIM;
+        ThemePalette tp=ThemePalette.get(this);BG=tp.bg;BAR=tp.bar;TEXT=tp.text;DIM=tp.dim;ACCENT=tp.accent;appliedTheme=tp.id;
+        getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(BG));
+        recolor(mainRoot,oldText,oldDim);
+        if(mainRoot!=null)mainRoot.setBackgroundColor(BG);
+        if(toolbar!=null)toolbar.setBackgroundColor(BAR);
+        if(overlay!=null)overlay.setBackgroundColor(BG);
+        if(loginLayer!=null)loginLayer.setBackgroundColor(BG);
+        if(web!=null)web.setBackgroundColor(BG);
+        if(loginWeb!=null)loginWeb.setBackgroundColor(BG);
+        if(actionBtn!=null&&actionBtn.getBackground() instanceof GradientDrawable)((GradientDrawable)actionBtn.getBackground()).setColor(ACCENT);
+        stylePills();updateStateArt();applyFishChrome();applyWindowPrefs();
+        if(web!=null)web.evaluateJavascript("window.__dshFishSkin="+"fish".equals(appliedTheme)+";window.__dshSetSkin&&window.__dshSetSkin(window.__dshFishSkin)",null);
+    }
+    private void recolor(View view,int oldText,int oldDim){
+        if(view==null||view instanceof WebView)return;
+        if(view instanceof TextView){TextView t=(TextView)view;int color=t.getCurrentTextColor();if(color==oldText)t.setTextColor(TEXT);else if(color==oldDim)t.setTextColor(DIM);}
+        if(view instanceof ImageView && view!=stateArt)((ImageView)view).setColorFilter(TEXT,android.graphics.PorterDuff.Mode.SRC_IN);
+        if(view instanceof ViewGroup){ViewGroup g=(ViewGroup)view;for(int i=0;i<g.getChildCount();i++)recolor(g.getChildAt(i),oldText,oldDim);}
+    }
     private void setDot(int color) {
         ((GradientDrawable) dot.getBackground()).setColor(color);
     }
@@ -1428,6 +1538,7 @@ public class MainActivity extends Activity {
             if (cm == null) return;
             netCb = new android.net.ConnectivityManager.NetworkCallback() {
                 @Override public void onAvailable(android.net.Network n) {
+                    Diagnostics.event(MainActivity.this,6,0,0);
                     handler.post(new Runnable() {
                         @Override public void run() {
                             if (mainRoot == null || destroyed) return;
@@ -1444,7 +1555,11 @@ public class MainActivity extends Activity {
                     });
                 }
 
+                @Override public void onCapabilitiesChanged(android.net.Network n,android.net.NetworkCapabilities caps){
+                    Diagnostics.network(MainActivity.this,caps);
+                }
                 @Override public void onLost(android.net.Network n) {
+                    Diagnostics.event(MainActivity.this,7,0,0);
                     handler.post(new Runnable() {
                         @Override public void run() {
                             if (!destroyed && mainRoot != null && pageEverLoaded) {
@@ -1458,6 +1573,7 @@ public class MainActivity extends Activity {
             cm.registerNetworkCallback(
                 new android.net.NetworkRequest.Builder()
                     .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
                     .build(), netCb);
         } catch (Exception ignored) {}
     }
@@ -1507,10 +1623,7 @@ public class MainActivity extends Activity {
         super.onResume();
         resumed = true;
         String t = Prefs.get(this).getString(Prefs.THEME, "midnight");
-        if (appliedTheme != null && !appliedTheme.equals(t)) {
-            recreate(); // theme changed in settings: rebuild every surface
-            return;
-        }
+        if (appliedTheme != null && !appliedTheme.equals(t)) applyLiveTheme();
         if (web != null) {
             web.onResume();
             applyWebPrefs(web);

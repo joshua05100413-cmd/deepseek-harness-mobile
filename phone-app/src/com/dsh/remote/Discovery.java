@@ -8,17 +8,9 @@ import org.json.JSONObject;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.security.SecureRandom;
-import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.List;
 
-import javax.net.ssl.HostnameVerifier;
-import javax.net.ssl.HttpsURLConnection;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLSocketFactory;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
 
 /**
  * "Universal capture": once the tunnel is up, look at every online tailnet
@@ -77,7 +69,11 @@ public final class Discovery {
                 for (String h : hosts) {
                     for (int port : PORTS) {
                         boolean tls = port == 443;
-                        String base = (tls ? "https://" : "http://") + h
+                        // Serve requires the DNS identity for SNI and certificate
+                        // verification. An IP is not a valid HTTPS fallback.
+                        if (tls && !h.equals(dns)) continue;
+                        String authority = h.contains(":") ? "[" + h + "]" : h;
+                        String base = (tls ? "https://" : "http://") + authority
                             + (tls ? "" : ":" + port) + "/";
                         if (!out.contains(base)) out.add(base);
                     }
@@ -93,17 +89,8 @@ public final class Discovery {
         HttpURLConnection c = null;
         try {
             c = (HttpURLConnection) new URL(url).openConnection();
-            if (c instanceof HttpsURLConnection) {
-                HttpsURLConnection hs = (HttpsURLConnection) c;
-                hs.setSSLSocketFactory(permissiveFactory());
-                hs.setHostnameVerifier(new HostnameVerifier() {
-                    @Override public boolean verify(String h, javax.net.ssl.SSLSession s) {
-                        return true;
-                    }
-                });
-            }
-            c.setConnectTimeout(2500);
-            c.setReadTimeout(2500);
+            c.setConnectTimeout(12000);
+            c.setReadTimeout(12000);
             c.setRequestMethod("GET");
             c.setInstanceFollowRedirects(false);
             int code = c.getResponseCode();
@@ -129,20 +116,4 @@ public final class Discovery {
         }
     }
 
-    private static SSLSocketFactory permissiveFactory() {
-        try {
-            TrustManager[] trust = new TrustManager[]{new X509TrustManager() {
-                @Override public void checkClientTrusted(X509Certificate[] c, String a) {}
-                @Override public void checkServerTrusted(X509Certificate[] c, String a) {}
-                @Override public X509Certificate[] getAcceptedIssuers() {
-                    return new X509Certificate[0];
-                }
-            }};
-            SSLContext ctx = SSLContext.getInstance("TLS");
-            ctx.init(null, trust, new SecureRandom());
-            return ctx.getSocketFactory();
-        } catch (Exception e) {
-            return null;
-        }
-    }
 }

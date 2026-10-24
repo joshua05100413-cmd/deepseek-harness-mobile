@@ -52,9 +52,8 @@ public final class Prefs {
 
     public static String hostOf(String url) {
         try {
-            String u = url.replace("https://", "").replace("http://", "");
-            int s = u.indexOf('/');
-            return s > 0 ? u.substring(0, s) : u;
+            String host = new java.net.URI(url).getHost();
+            return host == null ? "" : host;
         } catch (Exception e) {
             return url;
         }

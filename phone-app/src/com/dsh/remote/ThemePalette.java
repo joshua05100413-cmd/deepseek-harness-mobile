@@ -17,12 +17,14 @@ public final class ThemePalette {
         this.accent = accent;
     }
 
-    public static final String[] IDS = {"midnight", "ocean", "violet", "paper", "mist"};
-    public static final String[] NAMES = {"深邃黑", "深海蓝", "紫罗兰", "纸感白", "雾灰蓝"};
+    public static final String[] IDS = {"midnight", "ocean", "violet", "paper", "mist", "fish"};
+    public static final String[] NAMES = {"深邃黑", "深海蓝", "紫罗兰", "纸感白", "雾灰蓝", "大肥鱼 · 海盐蓝"};
 
     public static ThemePalette get(Context c) {
         String id = Prefs.get(c).getString(Prefs.THEME, "midnight");
         switch (id == null ? "midnight" : id) {
+            case "fish":
+                return new ThemePalette("fish",0xFFF0F6FC,0xFFFFFFFF,0xFF173252,0xFF59718C,0xFF346BC1);
             case "ocean":
                 return new ThemePalette("ocean", 0xFF0B1622, 0xFF12222F, 0xFFE6F1F8, 0xFF86A3B8, 0xFF2AA5D6);
             case "violet":
@@ -46,10 +48,8 @@ public final class ThemePalette {
         w.setStatusBarColor(bar);
         w.setNavigationBarColor(bg);
         int lum = (((bar >> 16) & 255) + ((bar >> 8) & 255) + (bar & 255)) / 3;
-        if (lum > 140) {
-            w.getDecorView().setSystemUiVisibility(
-                w.getDecorView().getSystemUiVisibility()
-                    | android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
-        }
+        int flags=w.getDecorView().getSystemUiVisibility();
+        int light=android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        w.getDecorView().setSystemUiVisibility(lum>140?flags|light:flags&~light);
     }
 }
