@@ -69,8 +69,13 @@
   };
   }
 
-  const viewport = document.querySelector('meta[name="viewport"]');
-  if (viewport) viewport.content = 'width=device-width, initial-scale=1, viewport-fit=cover';
+  let viewport = document.querySelector('meta[name="viewport"]');
+  if (!viewport) {
+    viewport = document.createElement('meta');
+    viewport.name = 'viewport';
+    document.head.appendChild(viewport);
+  }
+  viewport.content = 'width=device-width, initial-scale=1, viewport-fit=cover';
   const style = document.createElement('style');
   style.id = 'dsh-mobile-ui';
   style.textContent = `
@@ -124,6 +129,7 @@
   const navSelector = 'nav[aria-label="全局面板"],nav[aria-label="Global panel"]';
   let nav, frame, toggle;
   let auto = window.__dshAutoSidebar !== false;
+  let restoreWideSidebar = false;
   let frameObserver;
   let pending = 0;
   const added = new Set();
@@ -166,19 +172,23 @@
     if (frameObserver) frameObserver.disconnect();
     frameObserver = new MutationObserver(syncSidebar);
     frameObserver.observe(frame, { attributes: true, attributeFilter: ['data-sidebar-collapsed'] });
-    if (auto && narrow.matches) closeSidebar();
+    if (auto && narrow.matches && sidebarOpen()) {
+      restoreWideSidebar = true;
+      closeSidebar();
+    }
     syncSidebar();
   }
   window.__dshToggleSidebar = function () {
     attachSidebar();
     const button = findToggle();
     if (!button) return false;
+    if (narrow.matches) restoreWideSidebar = false;
     button.click();
     return true;
   };
   window.__dshSidebarOpen = sidebarOpen;
   window.__dshBackAction = function () {
-    if (!sidebarOpen()) return 0;
+    if (!auto || !narrow.matches || !sidebarOpen()) return 0;
     closeSidebar();
     return 1;
   };
@@ -187,7 +197,11 @@
     auto = value !== false;
     document.documentElement.toggleAttribute('data-dsh-drawer', auto);
     attachSidebar();
-    if (enabling && narrow.matches) closeSidebar();
+    if (enabling && narrow.matches && sidebarOpen()) {
+      restoreWideSidebar = true;
+      closeSidebar();
+    }
+    if (!auto) restoreWideSidebar = false;
   };
 
   // Delegate selection to the workbench first, then dismiss only the drawer.
@@ -244,7 +258,14 @@
   });
   observer.observe(document.body, { childList: true, subtree: true });
   narrow.addEventListener('change', () => {
-    if (auto && narrow.matches) closeSidebar();
+    if (auto && narrow.matches && sidebarOpen()) {
+      restoreWideSidebar = true;
+      closeSidebar();
+    } else if (auto && !narrow.matches && restoreWideSidebar) {
+      restoreWideSidebar = false;
+      const button = findToggle();
+      if (button && !sidebarOpen()) button.click();
+    }
     adaptDialogs();
   });
   document.addEventListener('visibilitychange', () => {

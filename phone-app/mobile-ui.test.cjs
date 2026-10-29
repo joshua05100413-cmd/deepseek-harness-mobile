@@ -199,6 +199,26 @@ test('mobile drawer layout, interaction and injection regressions', {timeout: 30
     await settle();
     assert.equal((await snapshot()).open, false);
   });
+  await t.test('wide layout restores a sidebar closed for a narrow window', async () => {
+    await resize(1024);
+    await settle();
+    if (!(await snapshot()).open) await evaluate('window.__dshToggleSidebar()');
+    await settle();
+    assert.equal((await snapshot()).open, true);
+    await resize(390);
+    await settle();
+    assert.equal((await snapshot()).open, false);
+    assert.equal((await snapshot()).width, 390);
+    await resize(1024);
+    await settle();
+    const state = await snapshot();
+    assert.equal(state.open, true);
+    assert.equal(state.width, 744);
+    assert.equal(state.mask, 'none');
+    assert.equal(await evaluate('window.__dshBackAction()'), 0);
+    await resize(390);
+    await settle();
+  });
   const tick = async (auto = true, refresh = true) => {
     await evaluate(`${refresh ? 'window.__dshNetworkChanged();' : ''}window.__dshConnectionState(${auto})`);
     await new Promise(resolve => setTimeout(resolve, 100));

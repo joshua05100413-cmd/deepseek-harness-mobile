@@ -13,7 +13,7 @@ const {execFileSync} = require('node:child_process');
 
 function bridge() {
   const file = path.join(__dirname, 'bridge/dsh-phone-proxy.cjs');
-  const source = fs.readFileSync(file, 'utf8').split('\nhttp\n  .createServer')[0];
+  const source = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n').split('\nhttp\n  .createServer')[0];
   const context = vm.createContext({
     require: require('node:module').createRequire(file), console, Buffer, setTimeout, clearTimeout,
     setInterval, clearInterval, URL, __dirname: path.dirname(file),
@@ -199,7 +199,7 @@ test('mobile fetch retries reads only and respects cancellation', async () => {
   const sourcePath = roots.map(p => path.resolve(__dirname, p, 'mobile_ui.js'))
     .find(p => fs.existsSync(p));
   const source = fs.readFileSync(sourcePath, 'utf8');
-  const script = source.slice(source.indexOf('const originalFetch'), source.indexOf('const viewport'));
+  const script = source.slice(source.indexOf('const originalFetch'), source.indexOf('let viewport'));
   let calls = 0;
   let failCount = 10;
   const context = vm.createContext({

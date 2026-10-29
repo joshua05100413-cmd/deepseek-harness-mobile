@@ -1,100 +1,54 @@
-# DSHgo
+# Deepseek Harness Mobile
 
-**把 DeepSeek Harness (dsh) 的工作台装进口袋。** 点开手机 App 就是电脑上正在跑的实时会话——可看、可操作、可语音。
+基于 [DSHgo v1.2](https://github.com/just-a-FA-for-name/DSHgo/tree/v1.2) 修改的安卓客户端与电脑桥接插件，用手机通过 Tailscale 访问电脑上的 DeepSeek Harness 工作台。
 
-手机端一个 APK（Tailscale 隧道内核内置），PC 端一个 dsh 插件 + Tailscale，开包即用。
+本版本使用 DSH 工作台原有界面；手机窄屏使用抽屉侧栏，较宽的屏幕使用并排布局。应用外壳只提供深色和浅色主题，不显示原项目的装饰性开屏、大肥鱼主题及 ZCode 入口。原版 v1.2 的连接恢复、诊断和文件续传等功能仍保留。
 
-- 作者：**Fa2517**（[bilibili](https://space.bilibili.com/330037645)）
-- 版本：v1.2 · 本项目完全开源 · [更新日志](CHANGELOG.md)
-- **有任何问题，欢迎在 B 站视频下方留言交流** → [@Fa2517](https://space.bilibili.com/330037645)；GitHub Issues 也行，但最好在 B 站知会一声
+## 快速安装
 
-## 功能
+### 电脑端（被连接的电脑）
 
-| | |
-|---|---|
-| 🔒 内置加密隧道 | Tailscale 内核编译进 APK，App 内登录建隧道，装一个 App 就够 |
-| 🎯 应用专用隧道 | 只允许 DSHgo 使用 VPN，显式下发 MagicDNS，其他应用保持原有网络 |
-| 🧭 万能抓取 | 隧道接通后自动识别远程工作台并直连，不挑主机名/端口 |
-| 👀 实时监控 | 电脑上正在跑的会话、子智能体、后台任务，手机实时可见可操作 |
-| 🎨 DSHgo / ZCode go 双模式 | 顶栏一键切换；切 ZCode 自动关隧道、切回自动开 |
-| 🪟 站点小窗 | 悬浮窗查看本地监控页（默认关闭，可选开关）；页面里的 127.0.0.1 请求自动穿隧道回电脑 |
-| 🎤 语音输入 | 麦克风权限自动申请，开箱即用 |
-| 🌗 弱网优化 | 连接状态提示、加载失败退避重试、实时流式转发 |
-| 📎 手机上传文件 | 系统选择器、多选、分块进度和网络中断后继续上传；从「＋ → 文件」添加 |
-| ☰ 手机抽屉导航 | 侧边栏默认收起，顶栏图标展开，选会话/点遮罩/返回键收起 |
-| 🐟 可选大肥鱼主题 | 顶部连接徽章、侧栏与输入卡片、连接/错误插画；设置中随时切换，保留当前页面 |
-| 🧾 免 root 诊断 | 有界本地状态日志，手动导出 ZIP；支持关闭和清除，不采集聊天或连接地址 |
-| 🎞 开机动画 | 右往左拉出；哔哩哔哩与 FA 2517 同组出现，浅色渐变背景 |
+1. 安装并登录 [Tailscale for Windows](https://tailscale.com/download/windows)，再安装并打开 DeepSeek Harness。
+2. 从本仓库下载源码并解压；进入 `pc-plugin`，双击 `install.bat`。
+3. 在 DSH 的「插件 → 已安装插件」中启用 `dsh-phone-remote`，完全退出并重新打开 DSH。
+4. 如果插件无法找到 `dsh` 命令，在 DSH 所用 profile 的 `cordis.patch.yml` 中为插件指定实际的命令行路径：
 
-> V1.2 在 SM-F7310 上验证了约 32 MiB 文件回执和合成 PNG 图片加载；尚不能保证所有图片来源和设备。文件断点恢复需要同时更新电脑插件；App / 桥接进程重启后需重新选择文件。详细测试范围见 [验收记录](docs/V1.2验收记录.md)。
+   ```yaml
+   - id: phone-remote
+     disabled: false
+     config:
+       dshBin: 'C:/你的路径/dsh.cmd'
+   ```
 
-## 安装
+   路径必须指向该电脑上可运行的 DSH 命令；可用 PowerShell 的 `Get-Command dsh` 查找。配置文件通常位于 `%USERPROFILE%\.dsh\profiles\desktop\cordis.patch.yml`。修改前建议备份。
+5. 在 [Tailscale DNS 设置](https://login.tailscale.com/admin/dns)中启用 MagicDNS 和 HTTPS 证书，然后让插件启动 Tailscale Serve。按页面要求确认；证书透明度日志会公开设备名称及 tailnet 域名。Serve 提供的是 tailnet 内访问，不是公开互联网访问。
 
-**PC 端（一次性）**
-1. 安装 [Tailscale](https://tailscale.com/) 并登录（与手机同账号）
-2. 安装 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh 桌面版）
-3. 进入 `pc-plugin/` 双击 `install.bat`，重启 dsh
+电脑插件负责登录转接和桥接；手机端的 v1.2 文件断点续传需要同时使用本仓库的 v1.2 电脑插件。更多配置见 [电脑插件说明](pc-plugin/README.md)。
 
-**手机端**
-1. 安装 `DSHRemote.apk`（[Releases](../../releases) 下载）
-2. 打开 → 登录 Tailscale（仅此一次）→ 允许 VPN / 麦克风授权
+### 安卓手机或平板
 
-更新到 v1.2：手机覆盖安装（保留原签名），电脑端重新运行插件安装脚本并重启 dsh。两端需要同时更新，具体原因与操作见 [V1.2 发布说明](docs/RELEASE-v1.2.md)。
+1. 从本仓库的 **Releases** 下载 `Deepseek-Harness-Mobile-v1.2-icon.apk` 并安装。需要 Android 8.0 或以上、ARM64 或 ARMv7 设备。
+2. 打开应用，登录与电脑相同的 Tailscale 账号，并允许 VPN 权限。
+3. 保持电脑开机、DSH 和 Tailscale 运行；应用会尝试自动发现并连接工作台。需要语音输入时再授权麦克风。
 
-之后每次打开 App 自动：建隧道 → 发现电脑 → 进入工作台。
+当前 APK 与上游 DSHgo 使用不同签名，不能直接覆盖安装上游原版；卸载旧应用可能清除其本地数据。与此前由本项目同一签名密钥构建的 APK 可以覆盖安装。Android 的权限限制、网络策略或设备兼容性仍可能影响连接，首次使用请实际测试。
 
-详细文档见 [`docs/使用说明.md`](docs/使用说明.md)。
+## 排查连接
 
-## 仓库结构
+- 确认电脑和手机登录的是同一个 tailnet，且 Tailscale 在线；在手机的系统 VPN 授权提示中选择允许。
+- 确认 DSH 已启用 `dsh-phone-remote` 并已重启；电脑桥接默认监听 `8124`，登录签发默认使用 `8090`。
+- 如果 Tailscale Serve 未启用，在电脑运行 `tailscale serve --bg 8124`，按命令给出的页面提示开启 HTTPS。可以运行 `tailscale serve status` 查看状态。
+- 如果桥接提示找不到 `dsh`，按上面的 `dshBin` 示例设置本机路径。若没有该命令，需要先安装可运行的 DSH CLI。
+- 应用内「设置 → 故障排查」可查看或手动导出诊断信息；检查后再决定是否分享诊断包。
 
-```
-phone-app/    Android 端源码（无 Gradle，build.bat 一键打包）
-pc-plugin/    PC 端 dsh 插件（install.bat 一键安装，dsh 启动即用）
-docs/         使用说明
-```
+## 源码与构建
 
-## 从源码构建手机端
+- `phone-app/`：安卓应用源码。
+- `pc-plugin/`：电脑桥接插件和安装脚本。
+- `docs/`：上游 v1.2 发布说明、使用说明和验收范围。
 
-```bat
-cd phone-app
-copy build-env.example.bat build-env.bat   :: 填入本机 JDK / Android SDK / libtailscale.aar 路径
-build.bat
-```
+安卓源码构建需要 JDK 17、Android SDK Platform 34、Build Tools 34.0.0，以及兼容的 `libtailscale.aar`。参照 `phone-app/build-env.example.bat` 配置本地路径，再运行 `phone-app/build.bat`。签名密钥仅保存在构建者本地，不包含在仓库中；使用不同密钥构建的 APK 无法覆盖已安装的本项目版本。仓库中的 APK 是已签名的构建产物，不含私钥。
 
-- 需要：JDK 17、Android SDK（build-tools 34、platform 34）
-- libtailscale.aar：用 [tailscale-android](https://github.com/tailscale/tailscale-android) 源码经 gomobile bind 产出
-- 签名密钥首次构建自动生成（`build/dsh.keystore`），勿提交到任何仓库
+## 来源与许可
 
-## 设计说明
-
-- **PC 插件零 dsh 内部依赖**：只用 `apply(ctx, config)` 插件形态 + node 内置模块
-  监督外部进程（`dsh web` 登录签发 + 桥接 + `tailscale serve`），dsh 版本升级不影响插件
-- **桥接自愈**：端口被占用自动让位、进程挂掉 30 秒内重启；App 的 web 端口每回启动
-  用 cookie 实测自动挑选（同进程可能托管多个 web 根）
-- **本地端口穿透**：串流到手机的本地页面里的 `127.0.0.1:*` 请求自动代理回电脑，
-  任何本地监控面板无需改动即可在手机使用
-
-## 隐私
-
-- 全程 Tailscale（WireGuard）加密隧道，仅自己设备可达
-- 凭据经 Android Keystore 加密存储，不出设备
-- App 不收集、不上传任何个人信息
-
-## 特别鸣谢
-
-特别鸣谢我的朋友 **catnaut**！
-
-感谢他提供一天“爽吃 Astra”的套餐，帮助我快速完成这个项目。非常感谢！
-
-## License
-
-[MIT](LICENSE) · Made with ❤ by [Fa2517](https://space.bilibili.com/330037645)
-· **有问题视频下方聊，B 站见！**
-
-## 诊断与主题
-
-手机设置 → 故障排查 → 本地诊断日志（默认开启）。在真实 5G 复现后，点击「导出诊断包」，选择保存位置，将 ZIP 与复现时间、操作一起反馈。无须 root、ADB 或 READ_LOGS 权限；不自动发送。日志只含数字状态事件，约 768 KiB 循环保存，不含聊天、文件名、IP、域名、Cookie、Token 或系统日志。可关闭记录、手动清除。
-
-设置 → 显示 → 主题风格 →「大肥鱼 · 海盐蓝」。保留原有五种主题，切换只更新当前界面颜色与装饰，不重建 WebView。仍按手机竖屏触控适配。
-
-代码沿用 MIT 许可；新增大肥鱼插画独立遵循 [素材署名与许可](phone-app/ASSET-LICENSES.md)，不能将图片视为 MIT 素材。
+基于 [DSHgo](https://github.com/just-a-FA-for-name/DSHgo)，原作者 Fa2517。原项目代码依照 [MIT 许可证](LICENSE)使用。上游大肥鱼素材及其独立许可说明保留在 [phone-app/ASSET-LICENSES.md](phone-app/ASSET-LICENSES.md)，这些素材未作为本版本主题展示；它们不受代码 MIT 许可覆盖。应用图标取自本机 DeepSeek Harness 安装包，其权利归原权利人所有，MIT 代码许可不自动覆盖该图标。

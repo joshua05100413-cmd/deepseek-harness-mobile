@@ -22,6 +22,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -101,9 +102,6 @@ public class SettingsActivity extends Activity {
         });
         switchRow(content, "站点小窗", "顶栏地球图标：弹窗查看本地页面/监控面板（默认关闭）",
             Prefs.get(this, Prefs.SITE_POPUP, false), Prefs.SITE_POPUP);
-        tapRow(content, "ZCode 远程链接", zcodeSummary(), new View.OnClickListener() {
-            @Override public void onClick(View v) { editZcodeUrl(); }
-        });
         switchRow(content, "启动时自动加载", "打开 App 后自动连接并载入工作台",
             Prefs.get(this, Prefs.AUTO_LOAD, true), Prefs.AUTO_LOAD);
         tapRow(content, "连接诊断", "检测隧道、目标可达性与延迟", new View.OnClickListener() {
@@ -115,12 +113,6 @@ public class SettingsActivity extends Activity {
         tapRow(content, "主题风格", themeSummary(), new View.OnClickListener() {
             @Override public void onClick(View v) { pickTheme(); }
         });
-        if("fish".equals(tp.id)) {
-            LinearLayout preview=rowBase();preview.setOrientation(LinearLayout.VERTICAL);preview.setGravity(Gravity.CENTER);
-            ImageView art=new ImageView(this);art.setImageResource(R.drawable.fish_happy);art.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            preview.addView(art,new LinearLayout.LayoutParams(dp(160),dp(160)));
-            TextView caption=new TextView(this);caption.setText("大肥鱼陪你远程办公 · 可随时切回原主题");caption.setTextColor(DIM);caption.setTextSize(12);preview.addView(caption);content.addView(preview);
-        }
         tapRow(content, "网页缩放", Prefs.fontPct(this) + "%",
             new View.OnClickListener() {
                 @Override public void onClick(View v) { pickFontScale(); }
@@ -166,10 +158,20 @@ public class SettingsActivity extends Activity {
         // ================= 关于 =================
         section(content, "关于");
         content.addView(aboutCard());
-        tapRow(content,"大肥鱼素材与许可","原作：上善无形 · 二次设计：ZipZipPipe · CC BY-NC-SA 4.0",v->
-            dialog("素材署名与许可",null).setMessage("素材来自 fisharchive.cc。原作上善无形，DeepSeek 元素二次设计 ZipZipPipe；图片采用 CC BY-NC-SA 4.0，保留署名、非商业使用、相同方式共享。图片许可独立于 MIT 代码许可。").setPositiveButton("知道了",null).show());
 
-        scroll.addView(content);
+        FrameLayout contentFrame = new FrameLayout(this) {
+            @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+                super.onSizeChanged(w, h, oldw, oldh);
+                if (getChildCount() == 0 || w == oldw) return;
+                View child = getChildAt(0);
+                FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) child.getLayoutParams();
+                params.width = Math.min(w, dp(720));
+                child.setLayoutParams(params);
+            }
+        };
+        contentFrame.addView(content, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.CENTER_HORIZONTAL));
+        scroll.addView(contentFrame);
         root.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         setContentView(root);
     }
@@ -282,7 +284,7 @@ public class SettingsActivity extends Activity {
         row.addView(brand);
 
         TextView ver = new TextView(this);
-        ver.setText("DSHgo  v1.2");
+        ver.setText(getString(R.string.app_name) + "  v1.2");
         ver.setTextColor(DIM);
         ver.setTextSize(12.5f);
         ver.setPadding(0, dp(12), 0, 0);
@@ -448,21 +450,21 @@ public class SettingsActivity extends Activity {
     }
 
     private String themeSummary() {
-        return ThemePalette.NAMES[ThemePalette.indexOf(Prefs.get(this).getString(Prefs.THEME, "midnight"))];
+        return ThemePalette.NAMES[ThemePalette.indexOf(ThemePalette.get(this).id)];
     }
 
     private String orientationSummary() {
-        String m = Prefs.get(this).getString(Prefs.ORIENTATION, "portrait");
+        String m = Prefs.get(this).getString(Prefs.ORIENTATION, "system");
         if ("landscape".equals(m)) return "横屏";
-        if ("system".equals(m)) return "跟随系统（适合平板）";
+        if ("system".equals(m) || "smart".equals(m)) return "跟随系统";
         return "竖屏";
     }
 
     private void pickOrientation() {
-        final String[] labels = {"竖屏（推荐）", "横屏", "跟随系统（适合平板）"};
+        final String[] labels = {"竖屏", "横屏", "跟随系统（推荐）"};
         final String[] values = {"portrait", "landscape", "system"};
-        String cur = Prefs.get(this).getString(Prefs.ORIENTATION, "portrait");
-        int checked = 0;
+        String cur = Prefs.get(this).getString(Prefs.ORIENTATION, "system");
+        int checked = 2;
         for (int i = 0; i < values.length; i++) if (values[i].equals(cur)) checked = i;
         dialog("屏幕方向", null)
             .setSingleChoiceItems(labels, checked, (d, w) -> {

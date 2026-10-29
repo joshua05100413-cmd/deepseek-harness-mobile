@@ -150,13 +150,6 @@ public class MainActivity extends Activity {
         buildMain();
         final FrameLayout wrap = new FrameLayout(this);
         wrap.addView(mainRoot, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        View splash = null;
-        if (!instant) {
-            bootStartMs = System.currentTimeMillis();
-            splash = buildSplashView();
-            final View fs = splash;
-            wrap.addView(fs, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        }
         setContentView(wrap);
         applyWindowPrefs();
         applyOrientationFor(false);
@@ -238,7 +231,7 @@ public class MainActivity extends Activity {
         LinearLayout switcher = new LinearLayout(this);
         switcher.setOrientation(LinearLayout.HORIZONTAL);
         switcher.setGravity(Gravity.CENTER_VERTICAL);
-        pillDsh = modePill("DSHgo");
+        pillDsh = modePill("DSH");
         pillZcode = modePill("ZCode go");
         pillDsh.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { switchMode("dsh"); }
@@ -247,9 +240,8 @@ public class MainActivity extends Activity {
             @Override public void onClick(View v) { switchMode("zcode"); }
         });
         switcher.addView(pillDsh);
-        switcher.addView(pillZcode);
         titles.addView(switcher);
-        appMode = Prefs.get(this).getString(Prefs.MODE, "dsh");
+        appMode = "dsh";
         stylePills();
         subtitleView = new TextView(this);
         subtitleView.setText("启动中…");
@@ -1133,22 +1125,19 @@ public class MainActivity extends Activity {
     // ------------------------------------------------------- connection
 
     private String orientationMode() {
-        return Prefs.get(this).getString(Prefs.ORIENTATION, "smart");
+        return Prefs.get(this).getString(Prefs.ORIENTATION, "system");
     }
 
     private void applyOrientationFor(boolean wideDialog) {
         String mode = orientationMode();
-        if ("system".equals(mode)) {
+        if ("system".equals(mode) || "smart".equals(mode)) {
             setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
         } else if ("landscape".equals(mode)) {
             setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
         } else {
-            // portrait is the default way to use this on a phone (incl. "smart")
             setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
         }
     }
-
-    private boolean wideDialog = false;
 
     private void poll() {
         if (mainRoot == null || destroyed || !resumed) return;
@@ -1354,18 +1343,6 @@ public class MainActivity extends Activity {
                     }
                 }
             });
-            // orientation intelligence: rotate when desktop-designed UI appears
-            if ("smart".equals(orientationMode())) {
-                web.evaluateJavascript("window.__dshDesktopWide?1:0", new android.webkit.ValueCallback<String>() {
-                    @Override public void onReceiveValue(String v) {
-                        boolean wide = "1".equals(String.valueOf(v).trim());
-                        if (wide != wideDialog) {
-                            wideDialog = wide;
-                            applyOrientationFor(wide);
-                        }
-                    }
-                });
-            }
             return;
         }
         if (pageLoading) {
@@ -1446,7 +1423,7 @@ public class MainActivity extends Activity {
         } else if (st == ST_NEED_LOGIN) {
             revealBootAfterAnim();
             overlay.setVisibility(View.VISIBLE);
-            statusTitle.setText("欢迎使用 DSHgo");
+            statusTitle.setText("欢迎使用 " + getString(R.string.app_name));
             statusSub.setText("首次使用请登录 Tailscale 账号（仅此一次，之后自动连接）");
             subtitleView.setText("待登录");
             actionBtn.setVisibility(View.VISIBLE);
@@ -1622,13 +1599,14 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         resumed = true;
-        String t = Prefs.get(this).getString(Prefs.THEME, "midnight");
+        String t = ThemePalette.get(this).id;
         if (appliedTheme != null && !appliedTheme.equals(t)) applyLiveTheme();
         if (web != null) {
             web.onResume();
             applyWebPrefs(web);
         }
         applyWindowPrefs();
+        applyOrientationFor(false);
         applySiteSwitch();
         if (web != null && pageEverLoaded && "dsh".equals(appMode)) {
             web.evaluateJavascript("window.__dshNetworkChanged&&window.__dshNetworkChanged();"
